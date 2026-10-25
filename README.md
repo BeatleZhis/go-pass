@@ -1,5 +1,7 @@
 # Go Pass — графический менеджер паролей для `pass`
 
+<img src="docs/icon.png" width="96" height="96" alt="Иконка Go Pass" align="right">
+
 Небольшое нативное приложение на Go (UI на [Fyne](https://fyne.io)) для работы с
 хранилищем [password-store](https://www.passwordstore.org/):
 
@@ -64,7 +66,8 @@
 make run        # запуск из исходников
 make build      # бинарник в bin/go-pass
 make test       # тесты
-make bundle     # macOS: dist/GoPass.app (двойной клик)
+make icon       # перерисовать иконку (assets + встроенная копия)
+make bundle     # macOS: dist/GoPass.app с иконкой (двойной клик)
 ```
 
 Без Makefile:
@@ -111,11 +114,20 @@ bin/go-pass -copy dev/github      # очистит буфер через -clear-
 main.go                     флаги, CLI-режимы (-list/-show/-copy), запуск UI
 internal/pass/store.go      обёртка над CLI pass: List (обход каталога), Show, Insert
 internal/clipboard/         буфер обмена: pbcopy, wl-copy, xclip/xsel, clip.exe
-internal/ui/                окно Fyne: список, поиск, детали, диалог добавления
+internal/ui/                окно Fyne: дерево, поиск, детали, диалог добавления
+internal/ui/theme.go        палитра в духе Obsidian + компактные размеры
+internal/ui/rowlabel.go     подпись строки дерева без паддингов
+internal/ui/assets/icon.png встроенная иконка (go:embed)
+tools/genicon/              генератор иконки на чистом Go
+assets/icon-1024.png        исходник иконки, из него собирается .icns
 ```
 
 * `pass.List()` обходит каталог хранилища и отдаёт имена `*.gpg` без расширения
   (скрытые файлы и `.git` пропускаются — как в `pass ls`).
+* Иконка рисуется генератором `tools/genicon` (только стандартная библиотека:
+  скругления, кольцо и градиенты с суперсэмплингом) в `assets/icon-1024.png`,
+  уменьшенная копия встраивается через `go:embed` и ставится как иконка
+  приложения, а `make icns` собирает из неё `AppIcon.icns` для `.app`-бандла.
 * Тема (`internal/ui/theme.go`) задаёт палитру в духе Obsidian и масштабирует
   размеры Fyne (текст, паддинги, иконки, межстрочный интервал); интерфейс
   тёмный независимо от системного оформления. Подпись строки дерева —

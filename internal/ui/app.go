@@ -95,6 +95,7 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 	}
 
 	applyTheme(fyneApp, opts.Scale)
+	fyneApp.SetIcon(appIcon())
 
 	a := &App{
 		store:       opts.Store,

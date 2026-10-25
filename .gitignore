@@ -1,5 +1,7 @@
 bin/
 dist/
+build/
+assets/AppIcon.icns
 *.app
 .cache/
 .DS_Store

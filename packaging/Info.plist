@@ -8,6 +8,8 @@
 	<string>Go Pass</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.github.beatlezhis.gopass</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleExecutable</key>
 	<string>go-pass</string>
 	<key>CFBundlePackageType</key>
