@@ -1,0 +1,5 @@
+bin/
+dist/
+*.app
+.cache/
+.DS_Store
