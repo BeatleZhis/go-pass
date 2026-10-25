@@ -36,6 +36,8 @@ type Options struct {
 	// Sync runs store operations and UI updates inline instead of in
 	// background goroutines. Tests use it to stay deterministic.
 	Sync bool
+	// Scale sets the UI density (1 = stock Fyne, 0.85 = compact default).
+	Scale float32
 }
 
 // App holds the widgets and state of the main window.
@@ -89,6 +91,8 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 		return nil, errors.New("ui: fyne.App обязателен")
 	}
 
+	applyUIScale(fyneApp, opts.Scale)
+
 	a := &App{
 		store:       opts.Store,
 		clip:        opts.Clip,
@@ -103,12 +107,15 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 	}
 
 	a.win = fyneApp.NewWindow("Go Pass — менеджер паролей")
-	a.win.Resize(fyne.NewSize(1040, 680))
+	a.win.Resize(a.restoredWindowSize())
 	a.win.SetMaster()
 	a.build()
 	a.restoreOpenBranches()
 	a.registerShortcuts()
-	a.win.SetOnClosed(func() { a.clip.Stop() })
+	a.win.SetOnClosed(func() {
+		a.saveWindowSize()
+		a.clip.Stop()
+	})
 	a.reload()
 	return a, nil
 }
@@ -176,6 +183,7 @@ func (a *App) build() {
 		a.nodeCreate,
 		a.nodeUpdate,
 	)
+	a.tree.HideSeparators = true
 	a.tree.OnSelected = a.treeSelected
 	a.tree.OnBranchOpened = func(string) { a.onBranchChanged() }
 	a.tree.OnBranchClosed = func(string) { a.onBranchChanged() }
@@ -248,7 +256,7 @@ func (a *App) build() {
 	)
 
 	split := container.NewHSplit(left, container.NewStack(a.placeholder, a.detail))
-	split.SetOffset(0.32)
+	split.SetOffset(0.30)
 
 	a.win.SetContent(container.NewBorder(a.toolbar(), statusBar, nil, nil, split))
 	a.showDetail(false)
@@ -400,6 +408,34 @@ func (a *App) selectByName(name string) {
 // prefOpenBranches is the preferences key that stores expanded folders.
 const prefOpenBranches = "tree.openBranches"
 
+// prefWindowSize stores the window size between runs.
+const prefWindowSize = "window.size"
+
+// defaultWindowSize is compact on purpose: the UI itself is dense and there is
+// no reason to open a big empty window.
+var defaultWindowSize = fyne.NewSize(920, 600)
+
+// restoredWindowSize returns the size used in the previous run.
+func (a *App) restoredWindowSize() fyne.Size {
+	raw := a.app.Preferences().String(prefWindowSize)
+	if raw != "" {
+		var w, h float32
+		if _, err := fmt.Sscanf(raw, "%gx%g", &w, &h); err == nil && w >= 400 && h >= 300 {
+			return fyne.NewSize(w, h)
+		}
+	}
+	return defaultWindowSize
+}
+
+// saveWindowSize remembers the current window size.
+func (a *App) saveWindowSize() {
+	size := a.win.Canvas().Size()
+	if size.Width < 200 || size.Height < 200 {
+		return // окно уже свернуто или скрыто
+	}
+	a.app.Preferences().SetString(prefWindowSize, fmt.Sprintf("%gx%g", size.Width, size.Height))
+}
+
 // onBranchChanged persists the expanded state after a user action.
 func (a *App) onBranchChanged() {
 	if a.noPersist {
@@ -548,9 +584,9 @@ func (a *App) nodeCreate(branch bool) fyne.CanvasObject {
 	if !branch {
 		icon.SetResource(theme.DocumentIcon())
 	}
-	label := widget.NewLabel("")
-	label.Truncation = fyne.TextTruncateEllipsis
-	label.TextStyle = fyne.TextStyle{Bold: branch}
+	// Своя подпись без паддингов: иначе строка дерева вдвое выше текста.
+	label := newElidedText()
+	label.SetBold(branch)
 	// Небольшой отступ между иконкой и подписью.
 	gap := canvas.NewRectangle(color.Transparent)
 	gap.SetMinSize(fyne.NewSize(4, 1))
@@ -574,7 +610,7 @@ func (a *App) nodeUpdate(uid widget.TreeNodeID, branch bool, o fyne.CanvasObject
 		}
 	}
 	label.SetText(name)
-	label.TextStyle = fyne.TextStyle{Bold: branch}
+	label.SetBold(branch)
 	if branch {
 		icon.SetResource(theme.FolderIcon())
 	} else {
@@ -584,16 +620,16 @@ func (a *App) nodeUpdate(uid widget.TreeNodeID, branch bool, o fyne.CanvasObject
 
 // rowParts finds the icon and label of a tree row template, which nests them in
 // a Border container.
-func rowParts(o fyne.CanvasObject) (*widget.Icon, *widget.Label) {
+func rowParts(o fyne.CanvasObject) (*widget.Icon, *elidedText) {
 	var icon *widget.Icon
-	var label *widget.Label
+	var label *elidedText
 
 	var walk func(fyne.CanvasObject)
 	walk = func(obj fyne.CanvasObject) {
 		switch v := obj.(type) {
 		case *widget.Icon:
 			icon = v
-		case *widget.Label:
+		case *elidedText:
 			label = v
 		case *fyne.Container:
 			for _, child := range v.Objects {

@@ -40,7 +40,7 @@ func TestVisualStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Window().Resize(fyne.NewSize(1040, 680))
+	a.Window().Resize(fyne.NewSize(920, 600))
 	a.Window().Show()
 	if len(a.visible) != 9 {
 		t.Fatalf("список: %+v", a.visible)

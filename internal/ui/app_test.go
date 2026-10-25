@@ -373,14 +373,14 @@ func TestTreeRowShowsCount(t *testing.T) {
 	if label == nil {
 		t.Fatal("в строке нет подписи")
 	}
-	if got := label.Text; got != "apps (1)" {
+	if got := label.Text(); got != "apps (1)" {
 		t.Errorf("подпись папки = %q, want %q", got, "apps (1)")
 	}
 
 	leaf := a.nodeCreate(false)
 	a.nodeUpdate("personal/mail", false, leaf)
 	_, leafLabel := rowParts(leaf)
-	if got := leafLabel.Text; got != "max" {
+	if got := leafLabel.Text(); got != "max" {
 		t.Errorf("подпись записи = %q, want max", got)
 	}
 }

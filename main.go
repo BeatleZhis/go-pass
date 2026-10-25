@@ -27,6 +27,7 @@ func main() {
 	show := flag.String("show", "", "напечатать пароль записи и выйти")
 	copyName := flag.String("copy", "", "скопировать пароль записи в буфер обмена и выйти")
 	appID := flag.String("app-id", "com.github.beatlezhis.gopass", "идентификатор приложения")
+	uiScale := flag.Float64("ui-scale", float64(ui.DefaultUIScale), "плотность интерфейса: 1 — как в Fyne, меньше — компактнее")
 	versionFlag := flag.Bool("version", false, "показать версию и выйти")
 
 	flag.Usage = func() {
@@ -108,7 +109,7 @@ func main() {
 		clip = clipboard.NewUnavailable(err)
 	}
 
-	if err := ui.Run(ui.Options{Store: store, Clip: clip, AppID: *appID}); err != nil {
+	if err := ui.Run(ui.Options{Store: store, Clip: clip, AppID: *appID, Scale: float32(*uiScale)}); err != nil {
 		failGUI(err)
 	}
 }
