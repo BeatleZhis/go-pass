@@ -4,8 +4,12 @@ ICON_PNG  := assets/icon-1024.png
 ICON_ICNS := assets/AppIcon.icns
 VERSION   ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 0.1.0)
 LDFLAGS   := -s -w -X main.version=$(VERSION)
+APP_DIR   := dist/$(APP_NAME).app
+# Минимальная версия macOS: Go-тулчейн собирает объектные файлы под 13.0.
+MACOS_MIN ?= 13.0
 
-.PHONY: all build run test vet fmt clean bundle install icon icns
+.PHONY: all build run test vet fmt clean bundle bundle-universal universal \
+        icon icns zip dmg release install
 
 all: build
 
@@ -45,17 +49,35 @@ clean:
 # macOS .app-бандл: нужен, чтобы приложение запускалось двойным кликом и
 # корректно забирало фокус для pinentry.
 bundle: build icns
-	rm -rf dist/$(APP_NAME).app
-	mkdir -p dist/$(APP_NAME).app/Contents/MacOS
-	mkdir -p dist/$(APP_NAME).app/Contents/Resources
-	cp packaging/Info.plist dist/$(APP_NAME).app/Contents/Info.plist
-	cp $(ICON_ICNS) dist/$(APP_NAME).app/Contents/Resources/AppIcon.icns
-	cp $(BIN) dist/$(APP_NAME).app/Contents/MacOS/go-pass
-	chmod +x dist/$(APP_NAME).app/Contents/MacOS/go-pass
-	codesign --force --sign - dist/$(APP_NAME).app >/dev/null 2>&1 || true
-	@echo "Готово: dist/$(APP_NAME).app"
+	./scripts/bundle.sh $(BIN) $(APP_DIR) $(ICON_ICNS)
+
+# Универсальный бинарник arm64 + x86_64. На Apple Silicon clang умеет обе
+# архитектуры, поэтому Intel-сборка делается на том же раннере.
+universal: icns
+	mkdir -p bin
+	CGO_ENABLED=1 GOARCH=arm64 MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) \
+		go build -trimpath -ldflags '$(LDFLAGS)' -o bin/go-pass-arm64 .
+	CGO_ENABLED=1 GOARCH=amd64 MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) \
+		go build -trimpath -ldflags '$(LDFLAGS)' -o bin/go-pass-amd64 .
+	lipo -create -output bin/go-pass-universal bin/go-pass-arm64 bin/go-pass-amd64
+	lipo -info bin/go-pass-universal
+
+bundle-universal: universal
+	./scripts/bundle.sh bin/go-pass-universal $(APP_DIR) $(ICON_ICNS)
+
+# Пакеты для выкладки: zip для GitHub Releases и dmg для установки мышкой.
+zip: bundle-universal
+	ditto -c -k --keepParent $(APP_DIR) dist/$(APP_NAME)-$(VERSION)-macos-universal.zip
+
+dmg: bundle-universal
+	./scripts/make-dmg.sh $(APP_DIR) dist/$(APP_NAME)-$(VERSION).dmg "$(APP_NAME)"
+
+release: bundle-universal
+	ditto -c -k --keepParent $(APP_DIR) dist/$(APP_NAME)-$(VERSION)-macos-universal.zip
+	./scripts/make-dmg.sh $(APP_DIR) dist/$(APP_NAME)-$(VERSION).dmg "$(APP_NAME)"
+	@echo "Пакеты: dist/*.zip dist/*.dmg"
 
 install: bundle
 	rm -rf /Applications/$(APP_NAME).app
-	cp -R dist/$(APP_NAME).app /Applications/
+	cp -R $(APP_DIR) /Applications/
 	@echo "Установлено: /Applications/$(APP_NAME).app"

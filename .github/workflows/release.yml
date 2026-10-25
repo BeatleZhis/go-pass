@@ -1,0 +1,91 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    # macos-latest = macOS 26, arm64. x86_64 собирается тем же clang'ом
+    # (GOARCH=amd64), затем оба среза склеиваются lipo в universal binary.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # нужен git describe для версии
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Версия
+        id: version
+        run: |
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Тесты
+        run: go test ./...
+
+      - name: Сборка .app, zip и dmg
+        run: make release VERSION=${{ steps.version.outputs.value }}
+
+      - name: Проверка пакетов
+        run: |
+          set -x
+          lipo -info dist/GoPass.app/Contents/MacOS/go-pass
+          codesign --verify --deep --strict dist/GoPass.app
+          dist/GoPass.app/Contents/MacOS/go-pass -version
+          hdiutil verify dist/GoPass-*.dmg
+          unzip -l dist/GoPass-*-macos-universal.zip | head -20
+
+      - name: Артефакты сборки
+        uses: actions/upload-artifact@v7
+        with:
+          name: GoPass-${{ steps.version.outputs.value }}-macos-universal
+          path: |
+            dist/*.zip
+            dist/*.dmg
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.zip
+            dist/*.dmg
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------------------
+  # Подпись Developer ID и нотаризация (опционально).
+  #
+  # 1. Добавьте секреты репозитория:
+  #      APPLE_CERT_P12       — base64 от .p12 с сертификатом "Developer ID Application"
+  #      APPLE_CERT_PASSWORD  — пароль от .p12
+  #      APPLE_ID             — Apple ID для notarytool
+  #      APPLE_TEAM_ID        — Team ID
+  #      APPLE_APP_PASSWORD   — app-specific password для notarytool
+  # 2. В job выше добавьте шаги: импорт сертификата в keychain, экспорт
+  #    CODESIGN_IDENTITY="Developer ID Application: ...", сборка (scripts/bundle.sh
+  #    подпишет им, если переменная задана), затем:
+  #      xcrun notarytool submit dist/*.dmg --apple-id "$APPLE_ID" \
+  #        --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+  #      xcrun stapler staple dist/*.dmg
+  # Без этого приложение подписано ad-hoc и при скачивании zip/dmg macOS
+  # попросит подтвердить запуск (см. README, раздел про Gatekeeper).
+  # ---------------------------------------------------------------------------

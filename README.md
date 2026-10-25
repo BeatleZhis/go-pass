@@ -55,7 +55,7 @@
 
 ## Требования
 
-* macOS или Linux с графической сессией;
+* macOS 13+ (Apple Silicon или Intel) или Linux с графической сессией;
 * установленный `pass` (password-store) и рабочий `gpg`-ключ;
 * для сборки — Go 1.24+ и компилятор C (на macOS — Xcode Command Line Tools,
   на Linux — `libgl1-mesa-dev xorg-dev`).
@@ -63,12 +63,17 @@
 ## Сборка и запуск
 
 ```bash
-make run        # запуск из исходников
-make build      # бинарник в bin/go-pass
-make test       # тесты
-make icon       # перерисовать иконку (assets + встроенная копия)
-make bundle     # macOS: dist/GoPass.app с иконкой (двойной клик)
+make run              # запуск из исходников
+make build            # бинарник в bin/go-pass (текущая архитектура)
+make test             # тесты
+make icon             # перерисовать иконку (assets + встроенная копия)
+make bundle           # macOS: dist/GoPass.app для текущей архитектуры
+make bundle-universal # macOS: универсальный .app (arm64 + x86_64)
+make release          # macOS: универсальные .app + zip + dmg в dist/
 ```
+
+`make release` собирает `dist/GoPass-<версия>-macos-universal.zip` и
+`dist/GoPass-<версия>.dmg` (dmg с ярлыком `/Applications`).
 
 Без Makefile:
 
@@ -76,6 +81,42 @@ make bundle     # macOS: dist/GoPass.app с иконкой (двойной кл�
 go build -o bin/go-pass .
 ./bin/go-pass
 ```
+
+## CI и релизы (GitHub Actions)
+
+Два workflow в `.github/workflows`:
+
+| Workflow | Когда | Что делает |
+| --- | --- | --- |
+| `ci.yml` | push в `main`, pull request, вручную | `gofmt`, `go vet`, `go test -race`, сборка универсального `.app` |
+| `release.yml` | тег `v*` или запуск вручную | тесты, `make release`, zip + dmg, артефакты и GitHub Release |
+
+Выпуск версии:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0     # запустит release.yml
+```
+
+Через несколько минут в Actions появятся артефакты
+`GoPass-0.1.0-macos-universal.zip` и `GoPass-0.1.0.dmg`, а к тегу приложится
+GitHub Release с этими файлами.
+
+**Почему так, а не матрица «arm + intel».** Все macOS-раннеры GitHub, кроме
+специального `macos-15-intel`, сейчас на Apple Silicon, а `macos-13` выведен из
+эксплуатации ([changelog](https://github.blog/changelog/2025-09-19-github-actions-macos-13-runner-image-is-closing-down/)),
+`macos-14` — тоже ([changelog](https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/)).
+Workflow использует `macos-latest` (macOS 26, arm64), собирает arm64 обычным
+`go build` и x86_64 тем же clang'ом (`CGO_ENABLED=1 GOARCH=amd64`), после чего
+`lipo` склеивает универсальный бинарник. Отдельный Intel-раннер не нужен.
+
+**Подпись.** По умолчанию — ad-hoc (`codesign --force --sign -`), приложение
+запускается локально; при скачивании zip/dmg macOS один раз попросит
+подтвердить запуск (или `xattr -dr com.apple.quarantine /Applications/GoPass.app`).
+Для распространения добавьте секреты `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`,
+`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`; `scripts/bundle.sh` подпишет
+бандл, если задан `CODESIGN_IDENTITY` (Developer ID), а в шаблон
+`release.yml` останется добавить `notarytool submit` + `stapler staple`.
 
 ## Флаги
 
@@ -120,6 +161,9 @@ internal/ui/rowlabel.go     подпись строки дерева без па
 internal/ui/assets/icon.png встроенная иконка (go:embed)
 tools/genicon/              генератор иконки на чистом Go
 assets/icon-1024.png        исходник иконки, из него собирается .icns
+scripts/bundle.sh           сборка .app из бинарника, plist и иконки
+scripts/make-dmg.sh         dmg с ярлыком /Applications
+.github/workflows/          ci.yml (тесты и сборка) и release.yml (пакеты по тегу)
 ```
 
 * `pass.List()` обходит каталог хранилища и отдаёт имена `*.gpg` без расширения

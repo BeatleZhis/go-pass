@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # macos-latest = macOS 26 на Apple Silicon (arm64).
+    # Intel-сборка делается кросс-компиляцией cgo на том же раннере.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Формат
+        run: |
+          unformatted="$(gofmt -l main.go internal tools)"
+          if [ -n "$unformatted" ]; then
+            echo "Неотформатированные файлы:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Тесты
+        run: go test -race ./...
+
+      - name: Универсальный .app (arm64 + x86_64)
+        run: make bundle-universal VERSION=ci
+
+      - name: Проверка архитектур
+        run: lipo -info dist/GoPass.app/Contents/MacOS/go-pass
