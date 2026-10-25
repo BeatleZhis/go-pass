@@ -335,3 +335,141 @@ func TestSelectByNameOpensAncestors(t *testing.T) {
 		t.Fatalf("запись не открылась: %+v", a.current)
 	}
 }
+
+func TestTreeFolderCounts(t *testing.T) {
+	entries := []pass.Entry{
+		{Name: "personal/mail"},
+		{Name: "personal/messenger"},
+		{Name: "dev/github"},
+		{Name: "cloud/aws/root"},
+		{Name: "cloud/aws/deploy"},
+		{Name: "single"},
+	}
+	nodes := buildTreeNodes(entries)
+
+	tests := map[string]int{
+		"":                  6,
+		"personal":              2,
+		"personal/mail":          1,
+		"dev":            1,
+		"cloud":           2,
+		"cloud/aws":      2,
+		"cloud/aws/root": 1,
+		"single":            1,
+	}
+	for uid, want := range tests {
+		if got := nodes[uid].count; got != want {
+			t.Errorf("count(%q) = %d, want %d", uid, got, want)
+		}
+	}
+}
+
+func TestTreeRowShowsCount(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	obj := a.nodeCreate(true)
+	a.nodeUpdate("personal", true, obj)
+	_, label := rowParts(obj)
+	if label == nil {
+		t.Fatal("в строке нет подписи")
+	}
+	if got := label.Text; got != "apps (1)" {
+		t.Errorf("подпись папки = %q, want %q", got, "apps (1)")
+	}
+
+	leaf := a.nodeCreate(false)
+	a.nodeUpdate("personal/mail", false, leaf)
+	_, leafLabel := rowParts(leaf)
+	if got := leafLabel.Text; got != "max" {
+		t.Errorf("подпись записи = %q, want max", got)
+	}
+}
+
+func TestExpandAndCollapseAll(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.expandAllBranches()
+	for _, uid := range []string{"personal", "dev", "cloud", "cloud/aws"} {
+		if !a.tree.IsBranchOpen(uid) {
+			t.Errorf("ветка %q не раскрыта", uid)
+		}
+	}
+
+	a.collapseAllBranches()
+	for _, uid := range []string{"personal", "dev", "cloud"} {
+		if a.tree.IsBranchOpen(uid) {
+			t.Errorf("ветка %q не свернута", uid)
+		}
+	}
+}
+
+func TestExpandedBranchesPersist(t *testing.T) {
+	fyneApp := test.NewTempApp(t)
+	store, _ := fakeStore(t, map[string]string{
+		"personal/mail":          "alpha-pass\n",
+		"personal/messenger":     "tango-pass\n",
+		"dev/github":        "bravo-pass\n",
+		"cloud/aws/root": "charlie-pass\n",
+	})
+	clip := clipboard.NewWithClipboard(&memClipboard{}, 0)
+
+	a, err := New(fyneApp, Options{Store: store, Clip: clip, Sync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Window().Resize(fyne.NewSize(800, 600))
+	a.Window().Show()
+
+	// Пользователь раскрыл «cloud» — состояние должно сохраниться.
+	a.tree.Select("cloud")
+	if !a.tree.IsBranchOpen("cloud") {
+		t.Fatal("ветка не раскрылась")
+	}
+	stored := fyneApp.Preferences().String(prefOpenBranches)
+	if !strings.Contains(stored, "cloud") {
+		t.Fatalf("состояние не сохранено: %q", stored)
+	}
+
+	// Поиск раскрывает всё, но не должен затирать сохранённое состояние.
+	a.search.SetText("aws")
+	if got := fyneApp.Preferences().String(prefOpenBranches); got != stored {
+		t.Errorf("поиск изменил сохранённое состояние: %q -> %q", stored, got)
+	}
+	a.search.SetText("")
+	if !a.tree.IsBranchOpen("cloud") {
+		t.Error("после сброса поиска раскрытая папка потерялась")
+	}
+
+	// Новый запуск с теми же preferences открывает ту же папку.
+	b, err := New(fyneApp, Options{Store: store, Clip: clip, Sync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !b.tree.IsBranchOpen("cloud") {
+		t.Error("состояние дерева не восстановилось при запуске")
+	}
+}
+
+func TestFilterKeepsUnrelatedOpenFolders(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.tree.Select("personal")
+	a.tree.Select("cloud")
+	if !a.tree.IsBranchOpen("personal") || !a.tree.IsBranchOpen("cloud") {
+		t.Fatal("папки не раскрылись")
+	}
+
+	// В результатах поиска нет открытых веток — состояние всё равно должно
+	// пережить поиск.
+	a.search.SetText("2fa")
+	if !a.tree.IsBranchOpen("dev") {
+		t.Error("ветка с совпадением не раскрылась")
+	}
+	a.search.SetText("")
+	if !a.tree.IsBranchOpen("personal") || !a.tree.IsBranchOpen("cloud") {
+		t.Error("после сброса поиска раскрытые ранее папки потерялись")
+	}
+	if a.tree.IsBranchOpen("dev") {
+		t.Error("ветка, раскрытая только поиском, должна свернуться")
+	}
+}

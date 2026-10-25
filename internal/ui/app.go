@@ -42,6 +42,7 @@ type Options struct {
 type App struct {
 	store *pass.Store
 	clip  *clipboard.Manager
+	app   fyne.App
 	win   fyne.Window
 
 	entries []pass.Entry             // all entries of the store
@@ -71,6 +72,11 @@ type App struct {
 
 	clearAfter  time.Duration
 	wasFiltered bool
+
+	// savedOpen keeps the expanded folders while a search is active.
+	savedOpen []string
+	// noPersist suppresses saving of the expanded state (during filtering).
+	noPersist bool
 }
 
 // New builds the application UI on top of the given Fyne application.
@@ -86,6 +92,7 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 	a := &App{
 		store:       opts.Store,
 		clip:        opts.Clip,
+		app:         fyneApp,
 		cache:       make(map[string]*pass.Secret),
 		synchronous: opts.Sync,
 		clearAfter:  opts.Clip.Timeout,
@@ -99,6 +106,7 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 	a.win.Resize(fyne.NewSize(1040, 680))
 	a.win.SetMaster()
 	a.build()
+	a.restoreOpenBranches()
 	a.registerShortcuts()
 	a.win.SetOnClosed(func() { a.clip.Stop() })
 	a.reload()
@@ -169,6 +177,8 @@ func (a *App) build() {
 		a.nodeUpdate,
 	)
 	a.tree.OnSelected = a.treeSelected
+	a.tree.OnBranchOpened = func(string) { a.onBranchChanged() }
+	a.tree.OnBranchClosed = func(string) { a.onBranchChanged() }
 
 	a.listEmpty = widget.NewLabel("Хранилище пустое")
 	a.listEmpty.Alignment = fyne.TextAlignCenter
@@ -254,7 +264,14 @@ func (a *App) toolbar() fyne.CanvasObject {
 		a.reload()
 	})
 
-	bar := container.NewBorder(nil, nil, container.NewHBox(addBtn, refreshBtn), nil)
+	expandBtn := widget.NewButtonWithIcon("Развернуть", theme.MenuExpandIcon(), a.expandAllBranches)
+	expandBtn.Importance = widget.LowImportance
+
+	collapseBtn := widget.NewButtonWithIcon("Свернуть", theme.MenuDropDownIcon(), a.collapseAllBranches)
+	collapseBtn.Importance = widget.LowImportance
+
+	bar := container.NewBorder(nil, nil,
+		container.NewHBox(addBtn, refreshBtn, expandBtn, collapseBtn), nil)
 	return container.NewVBox(bar, widget.NewSeparator())
 }
 
@@ -308,6 +325,12 @@ func (a *App) setEntries(entries []pass.Entry) {
 func (a *App) applyFilter() {
 	q := strings.ToLower(strings.TrimSpace(a.search.Text))
 
+	// Раскрытые папки запоминаем до перестройки дерева: в отфильтрованном
+	// наборе нужных веток может не оказаться.
+	if q != "" && !a.wasFiltered {
+		a.savedOpen = a.collectOpenBranches()
+	}
+
 	a.visible = a.visible[:0]
 	for _, e := range a.entries {
 		if q == "" || strings.Contains(strings.ToLower(e.Name), q) {
@@ -318,11 +341,12 @@ func (a *App) applyFilter() {
 	a.tree.Refresh()
 
 	// Пока идёт поиск, раскрываем всё найденное; при сбросе поиска возвращаем
-	// дерево в компактный вид.
+	// дерево к тому виду, который пользователь настроил сам.
 	if q != "" {
-		a.tree.OpenAllBranches()
+		a.withoutPersist(func() { a.tree.OpenAllBranches() })
 	} else if a.wasFiltered {
-		a.tree.CloseAllBranches()
+		a.withoutPersist(func() { a.tree.CloseAllBranches() })
+		a.openBranches(a.savedOpen)
 	}
 	a.wasFiltered = q != ""
 
@@ -373,6 +397,71 @@ func (a *App) selectByName(name string) {
 	a.tree.ScrollTo(name)
 }
 
+// prefOpenBranches is the preferences key that stores expanded folders.
+const prefOpenBranches = "tree.openBranches"
+
+// onBranchChanged persists the expanded state after a user action.
+func (a *App) onBranchChanged() {
+	if a.noPersist {
+		return
+	}
+	a.persistOpenBranches()
+}
+
+// withoutPersist runs fn without recording branch changes (used while filtering).
+func (a *App) withoutPersist(fn func()) {
+	previous := a.noPersist
+	a.noPersist = true
+	fn()
+	a.noPersist = previous
+}
+
+// collectOpenBranches returns the uids of the currently expanded folders.
+func (a *App) collectOpenBranches() []string {
+	open := make([]string, 0, len(a.nodes))
+	for uid, n := range a.nodes {
+		if len(n.children) > 0 && a.tree.IsBranchOpen(uid) {
+			open = append(open, uid)
+		}
+	}
+	sort.Strings(open)
+	return open
+}
+
+// persistOpenBranches stores the expanded folders in the app preferences, so
+// the tree opens the same way next time.
+func (a *App) persistOpenBranches() {
+	a.app.Preferences().SetString(prefOpenBranches, strings.Join(a.collectOpenBranches(), "\n"))
+}
+
+// restoreOpenBranches expands the folders remembered from the previous run.
+func (a *App) restoreOpenBranches() {
+	a.openBranches(strings.Split(a.app.Preferences().String(prefOpenBranches), "\n"))
+}
+
+// openBranches expands the given folders without touching the stored state.
+func (a *App) openBranches(uids []string) {
+	a.withoutPersist(func() {
+		for _, uid := range uids {
+			if uid != "" {
+				a.tree.OpenBranch(uid)
+			}
+		}
+	})
+}
+
+// expandAllBranches opens every folder and remembers that.
+func (a *App) expandAllBranches() {
+	a.withoutPersist(func() { a.tree.OpenAllBranches() })
+	a.persistOpenBranches()
+}
+
+// collapseAllBranches closes every folder and remembers that.
+func (a *App) collapseAllBranches() {
+	a.withoutPersist(func() { a.tree.CloseAllBranches() })
+	a.persistOpenBranches()
+}
+
 // treeSelected handles a click on a tree row: folders expand, entries decrypt.
 func (a *App) treeSelected(uid widget.TreeNodeID) {
 	n := a.nodes[uid]
@@ -396,6 +485,8 @@ func (a *App) treeSelected(uid widget.TreeNodeID) {
 type treeNodeInfo struct {
 	children []string
 	secret   bool
+	// count is the number of stored entries in this subtree.
+	count int
 }
 
 // buildTreeNodes turns a flat entry list into a folder tree. The empty uid is
@@ -419,6 +510,24 @@ func buildTreeNodes(entries []pass.Entry) map[string]*treeNodeInfo {
 			parent = uid
 		}
 	}
+
+	var countSecrets func(uid string) int
+	countSecrets = func(uid string) int {
+		n := nodes[uid]
+		if n == nil {
+			return 0
+		}
+		c := 0
+		if n.secret {
+			c = 1
+		}
+		for _, child := range n.children {
+			c += countSecrets(child)
+		}
+		n.count = c
+		return c
+	}
+	countSecrets("")
 
 	for _, n := range nodes {
 		sort.Slice(n.children, func(i, j int) bool {
@@ -458,7 +567,13 @@ func (a *App) nodeUpdate(uid widget.TreeNodeID, branch bool, o fyne.CanvasObject
 		return
 	}
 
-	label.SetText(baseName(uid))
+	name := baseName(uid)
+	if branch {
+		if n := a.nodes[uid]; n != nil {
+			name = fmt.Sprintf("%s (%d)", name, n.count)
+		}
+	}
+	label.SetText(name)
 	label.TextStyle = fyne.TextStyle{Bold: branch}
 	if branch {
 		icon.SetResource(theme.FolderIcon())
