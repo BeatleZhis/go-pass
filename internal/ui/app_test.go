@@ -473,3 +473,49 @@ func TestFilterKeepsUnrelatedOpenFolders(t *testing.T) {
 		t.Error("ветка, раскрытая только поиском, должна свернуться")
 	}
 }
+
+func TestTreeToggleButton(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	// Изначально дерево свёрнуто — кнопка предлагает раскрыть.
+	if got := a.toggleBtn.Text; got != "Развернуть" {
+		t.Fatalf("начальная подпись кнопки = %q, want Развернуть", got)
+	}
+
+	test.Tap(a.toggleBtn)
+	if !a.tree.IsBranchOpen("personal") || !a.tree.IsBranchOpen("cloud/aws") {
+		t.Error("кнопка не раскрыла дерево")
+	}
+	if got := a.toggleBtn.Text; got != "Свернуть" {
+		t.Errorf("после раскрытия подпись = %q, want Свернуть", got)
+	}
+
+	test.Tap(a.toggleBtn)
+	if a.tree.IsBranchOpen("personal") || a.tree.IsBranchOpen("cloud") {
+		t.Error("кнопка не свернула дерево")
+	}
+	if got := a.toggleBtn.Text; got != "Развернуть" {
+		t.Errorf("после сворачивания подпись = %q, want Развернуть", got)
+	}
+}
+
+func TestTreeToggleFollowsManualExpansion(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	// Раскрываем все папки вручную — кнопка должна предложить свернуть.
+	for _, uid := range []string{"personal", "dev", "cloud", "cloud/aws"} {
+		a.tree.Select(uid)
+	}
+	if !a.allBranchesOpen() {
+		t.Fatal("не все папки раскрылись")
+	}
+	if got := a.toggleBtn.Text; got != "Свернуть" {
+		t.Errorf("подпись = %q, want Свернуть", got)
+	}
+
+	// Свернули одну папку — снова предлагаем раскрыть.
+	a.tree.Select("dev")
+	if got := a.toggleBtn.Text; got != "Развернуть" {
+		t.Errorf("подпись = %q, want Развернуть", got)
+	}
+}

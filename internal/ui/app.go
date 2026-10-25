@@ -64,6 +64,7 @@ type App struct {
 	details     *widget.Label
 	revealBtn   *widget.Button
 	copyBtn     *widget.Button
+	toggleBtn   *widget.Button
 	status      *widget.Label
 	placeholder fyne.CanvasObject
 	detail      fyne.CanvasObject
@@ -299,14 +300,11 @@ func (a *App) toolbar() fyne.CanvasObject {
 		a.reload()
 	})
 
-	expandBtn := widget.NewButtonWithIcon("Развернуть", theme.MenuExpandIcon(), a.expandAllBranches)
-	expandBtn.Importance = widget.LowImportance
-
-	collapseBtn := widget.NewButtonWithIcon("Свернуть", theme.MenuDropDownIcon(), a.collapseAllBranches)
-	collapseBtn.Importance = widget.LowImportance
+	a.toggleBtn = widget.NewButtonWithIcon("Развернуть", theme.MenuExpandIcon(), a.toggleAllBranches)
+	a.toggleBtn.Importance = widget.LowImportance
 
 	bar := container.NewBorder(nil, nil,
-		container.NewHBox(addBtn, refreshBtn, expandBtn, collapseBtn), nil)
+		container.NewHBox(addBtn, refreshBtn, a.toggleBtn), nil)
 	bg := canvas.NewRectangle(colorSidebar)
 	return container.NewVBox(
 		container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), bar)),
@@ -400,6 +398,7 @@ func (a *App) applyFilter() {
 		a.listEmpty.Hide()
 	}
 
+	a.refreshTreeToggle()
 	a.updateCountStatus()
 }
 
@@ -469,6 +468,7 @@ func (a *App) saveWindowSize() {
 
 // onBranchChanged persists the expanded state after a user action.
 func (a *App) onBranchChanged() {
+	a.refreshTreeToggle()
 	if a.noPersist {
 		return
 	}
@@ -515,6 +515,65 @@ func (a *App) openBranches(uids []string) {
 			}
 		}
 	})
+}
+
+// toggleAllBranches expands or collapses the whole tree from one button: it
+// shows what the click will do, so there is no need for two separate buttons.
+func (a *App) toggleAllBranches() {
+	if a.allBranchesOpen() {
+		a.collapseAllBranches()
+	} else {
+		a.expandAllBranches()
+	}
+	a.refreshTreeToggle()
+}
+
+// allBranchesOpen reports whether every folder with children is expanded.
+func (a *App) allBranchesOpen() bool {
+	branches := a.branchUIDs()
+	if len(branches) == 0 {
+		return false
+	}
+	for _, uid := range branches {
+		if !a.tree.IsBranchOpen(uid) {
+			return false
+		}
+	}
+	return true
+}
+
+// branchUIDs lists every folder that has children in the current tree.
+func (a *App) branchUIDs() []string {
+	uids := make([]string, 0, len(a.nodes))
+	for uid, n := range a.nodes {
+		if len(n.children) > 0 {
+			uids = append(uids, uid)
+		}
+	}
+	return uids
+}
+
+// refreshTreeToggle keeps the single expand/collapse button in sync with the
+// tree state.
+func (a *App) refreshTreeToggle() {
+	if a.toggleBtn == nil {
+		return
+	}
+	if len(a.branchUIDs()) == 0 {
+		a.toggleBtn.SetText("Развернуть")
+		a.toggleBtn.SetIcon(theme.MenuExpandIcon())
+		a.toggleBtn.Disable()
+		return
+	}
+	a.toggleBtn.Enable()
+	if a.allBranchesOpen() {
+		a.toggleBtn.SetText("Свернуть")
+		a.toggleBtn.SetIcon(theme.MenuDropDownIcon())
+	} else {
+		a.toggleBtn.SetText("Развернуть")
+		a.toggleBtn.SetIcon(theme.MenuExpandIcon())
+	}
+	a.toggleBtn.Refresh()
 }
 
 // expandAllBranches opens every folder and remembers that.
