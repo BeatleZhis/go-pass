@@ -16,10 +16,11 @@ import (
 type elidedText struct {
 	widget.BaseWidget
 
-	text  string
-	bold  bool
-	mono  bool
-	color fyne.ThemeColorName
+	text     string
+	bold     bool
+	mono     bool
+	textSize float32
+	color    fyne.ThemeColorName
 }
 
 func newElidedText() *elidedText {
@@ -46,6 +47,15 @@ func (t *elidedText) SetBold(bold bool) {
 	t.Refresh()
 }
 
+// SetTextSize overrides the font size; zero means the theme text size.
+func (t *elidedText) SetTextSize(size float32) {
+	if t.textSize == size {
+		return
+	}
+	t.textSize = size
+	t.Refresh()
+}
+
 // Text returns the current text.
 func (t *elidedText) Text() string {
 	return t.text
@@ -66,16 +76,24 @@ func (r *elidedTextRenderer) style() fyne.TextStyle {
 	return fyne.TextStyle{Bold: r.label.bold, Monospace: r.label.mono}
 }
 
+// size is the font size used for measuring and drawing.
+func (r *elidedTextRenderer) size() float32 {
+	if r.label.textSize > 0 {
+		return r.label.textSize
+	}
+	return theme.TextSize()
+}
+
 // MinSize reports the height of one line but a deliberately small width: the
 // tree should be able to shrink and elide long names instead of demanding space.
 func (r *elidedTextRenderer) MinSize() fyne.Size {
-	size := theme.TextSize()
+	size := r.size()
 	height := fyne.MeasureText("Ag", size, r.style()).Height
 	return fyne.NewSize(size*2, height)
 }
 
 func (r *elidedTextRenderer) Layout(size fyne.Size) {
-	r.text.TextSize = theme.TextSize()
+	r.text.TextSize = r.size()
 	r.text.TextStyle = r.style()
 	r.text.Text = fitText(r.label.text, size.Width, r.text.TextSize, r.text.TextStyle)
 	r.text.Move(fyne.NewPos(0, 0))

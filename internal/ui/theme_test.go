@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image/color"
 	"strings"
 	"testing"
 
@@ -11,9 +12,9 @@ import (
 	"github.com/beatlezhis/go-pass/internal/clipboard"
 )
 
-func TestCompactThemeScalesMetrics(t *testing.T) {
+func TestAppThemeScalesMetrics(t *testing.T) {
 	base := theme.DefaultTheme()
-	compact := &compactTheme{base: base, scale: 0.8}
+	compact := &appTheme{base: base, scale: 0.8}
 
 	// Шрифт и отступы уменьшаются.
 	if got, want := compact.Size(theme.SizeNameText), float32(11); got != want {
@@ -41,7 +42,7 @@ func TestCompactThemeScalesMetrics(t *testing.T) {
 	}
 
 	// Масштаб 1 оставляет тему нетронутой.
-	stock := &compactTheme{base: base, scale: 1}
+	stock := &appTheme{base: base, scale: 1}
 	if got, want := stock.Size(theme.SizeNameText), base.Size(theme.SizeNameText); got != want {
 		t.Errorf("при scale=1 text = %v, want %v", got, want)
 	}
@@ -130,5 +131,32 @@ func TestWindowSizeDefaultsToCompact(t *testing.T) {
 	}
 	if got := a.Window().Canvas().Size(); got != defaultWindowSize {
 		t.Errorf("размер окна = %v, want %v", got, defaultWindowSize)
+	}
+}
+
+func TestAppThemePalette(t *testing.T) {
+	th := &appTheme{base: theme.DefaultTheme(), scale: DefaultUIScale}
+
+	checks := map[fyne.ThemeColorName]color.NRGBA{
+		theme.ColorNameBackground: colorBackground,
+		theme.ColorNameForeground: colorForeground,
+		theme.ColorNamePrimary:    colorAccent,
+		theme.ColorNameSelection:  colorSelection,
+		theme.ColorNameSeparator:  colorBorder,
+		theme.ColorNameButton:     colorPanel,
+	}
+	for name, want := range checks {
+		// Схема тёмная независимо от системной темы.
+		for _, variant := range []fyne.ThemeVariant{theme.VariantDark, theme.VariantLight} {
+			got, ok := th.Color(name, variant).(color.NRGBA)
+			if !ok || got != want {
+				t.Errorf("Color(%v, %v) = %v, want %v", name, variant, got, want)
+			}
+		}
+	}
+
+	// Акцент Obsidian — фиолетовый, текст на нём белый.
+	if got := th.Color(theme.ColorNamePrimary, theme.VariantDark).(color.NRGBA); got.B <= got.R {
+		t.Errorf("акцент должен быть фиолетовым: %v", got)
 	}
 }

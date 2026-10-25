@@ -18,6 +18,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -58,7 +59,7 @@ type App struct {
 	search      *widget.Entry
 	tree        *widget.Tree
 	listEmpty   *widget.Label
-	title       *widget.Label
+	title       *elidedText
 	passLabel   *widget.Label
 	details     *widget.Label
 	revealBtn   *widget.Button
@@ -66,6 +67,7 @@ type App struct {
 	status      *widget.Label
 	placeholder fyne.CanvasObject
 	detail      fyne.CanvasObject
+	card        fyne.CanvasObject
 
 	synchronous bool
 
@@ -91,7 +93,7 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 		return nil, errors.New("ui: fyne.App обязателен")
 	}
 
-	applyUIScale(fyneApp, opts.Scale)
+	applyTheme(fyneApp, opts.Scale)
 
 	a := &App{
 		store:       opts.Store,
@@ -134,6 +136,14 @@ func Run(opts Options) error {
 	}
 	a.win.ShowAndRun()
 	return nil
+}
+
+// themeSize reads a metric from the current theme.
+func (a *App) themeSize(name fyne.ThemeSizeName) float32 {
+	if th := a.app.Settings().Theme(); th != nil {
+		return th.Size(name)
+	}
+	return theme.DefaultTheme().Size(name)
 }
 
 // uiDo runs fn on the UI goroutine. Everything that touches widgets from a
@@ -195,12 +205,15 @@ func (a *App) build() {
 
 	a.nodes = buildTreeNodes(nil)
 
-	left := container.NewBorder(a.search, nil, nil, nil,
+	leftContent := container.NewBorder(a.search, nil, nil, nil,
 		container.NewStack(a.tree, container.NewCenter(a.listEmpty)))
+	sidebar := canvas.NewRectangle(colorSidebar)
+	left := container.NewStack(sidebar,
+		container.New(layout.NewCustomPaddedLayout(8, 6, 8, 8), leftContent))
 
-	a.title = widget.NewLabel("")
-	a.title.TextStyle = fyne.TextStyle{Bold: true}
-	a.title.Truncation = fyne.TextTruncateEllipsis
+	a.title = newElidedText()
+	a.title.SetBold(true)
+	a.title.SetTextSize(a.themeSize(theme.SizeNameSubHeadingText))
 
 	a.passLabel = widget.NewLabel("")
 	a.passLabel.TextStyle = fyne.TextStyle{Monospace: true}
@@ -224,11 +237,11 @@ func (a *App) build() {
 	a.details.Truncation = fyne.TextTruncateOff
 
 	passwordBox := container.NewVBox(
-		widget.NewLabelWithStyle("Пароль", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		sectionLabel("ПАРОЛЬ"),
 		container.NewBorder(nil, nil, nil, container.NewHBox(a.revealBtn, copyAllBtn), a.passLabel),
 		container.NewHBox(a.copyBtn),
 		widget.NewSeparator(),
-		widget.NewLabelWithStyle("Метаданные и заметки", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		sectionLabel("МЕТАДАННЫЕ И ЗАМЕТКИ"),
 	)
 
 	detailBody := container.NewBorder(
@@ -236,11 +249,20 @@ func (a *App) build() {
 		nil, nil, nil,
 		container.NewVScroll(a.details),
 	)
-	a.detail = container.NewPadded(detailBody)
+	a.detail = detailBody
 
 	placeholderLabel := widget.NewLabel("Выберите запись в дереве слева —\nпароль будет расшифрован через pass")
 	placeholderLabel.Alignment = fyne.TextAlignCenter
 	a.placeholder = container.NewCenter(placeholderLabel)
+
+	// Карточка в стиле Obsidian: тёмная панель со скруглёнными углами.
+	card := canvas.NewRectangle(colorPanel)
+	card.CornerRadius = 8
+	card.StrokeColor = colorBorder
+	card.StrokeWidth = 1
+	a.card = container.NewStack(card,
+		container.New(layout.NewCustomPaddedLayout(12, 12, 14, 14),
+			container.NewStack(a.placeholder, a.detail)))
 
 	a.status = widget.NewLabel("Готово")
 	a.status.Truncation = fyne.TextTruncateEllipsis
@@ -255,10 +277,15 @@ func (a *App) build() {
 		a.status,
 	)
 
-	split := container.NewHSplit(left, container.NewStack(a.placeholder, a.detail))
+	split := container.NewHSplit(left,
+		container.New(layout.NewCustomPaddedLayout(6, 6, 6, 6), a.card))
 	split.SetOffset(0.30)
 
-	a.win.SetContent(container.NewBorder(a.toolbar(), statusBar, nil, nil, split))
+	statusBg := canvas.NewRectangle(colorSidebar)
+	status := container.NewStack(statusBg,
+		container.New(layout.NewCustomPaddedLayout(2, 2, 8, 8), statusBar))
+
+	a.win.SetContent(container.NewBorder(a.toolbar(), status, nil, nil, split))
 	a.showDetail(false)
 }
 
@@ -280,7 +307,11 @@ func (a *App) toolbar() fyne.CanvasObject {
 
 	bar := container.NewBorder(nil, nil,
 		container.NewHBox(addBtn, refreshBtn, expandBtn, collapseBtn), nil)
-	return container.NewVBox(bar, widget.NewSeparator())
+	bg := canvas.NewRectangle(colorSidebar)
+	return container.NewVBox(
+		container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), bar)),
+		widget.NewSeparator(),
+	)
 }
 
 // registerShortcuts wires Cmd/Ctrl+C and Cmd/Ctrl+N.
@@ -1014,6 +1045,14 @@ func (a *App) report(err error) {
 	msg := err.Error()
 	a.setStatus(msg)
 	dialog.ShowError(errors.New(msg), a.win)
+}
+
+// sectionLabel renders a small muted heading, like the panel titles in Obsidian.
+func sectionLabel(text string) fyne.CanvasObject {
+	label := canvas.NewText(text, colorMuted)
+	label.TextSize = theme.CaptionTextSize()
+	label.TextStyle = fyne.TextStyle{Bold: true}
+	return label
 }
 
 // abbreviateHome shortens a path below the user's home directory to "~/...".
