@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"os"
 	"sort"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -42,15 +44,16 @@ type App struct {
 	clip  *clipboard.Manager
 	win   fyne.Window
 
-	entries []pass.Entry // all entries of the store
-	visible []pass.Entry // entries matching the current filter
+	entries []pass.Entry             // all entries of the store
+	visible []pass.Entry             // entries matching the current filter
+	nodes   map[string]*treeNodeInfo // uid -> folder/entry node of the tree
 
 	selected string       // name shown in the detail pane
 	current  *pass.Secret // decrypted entry shown in the detail pane
 	revealed bool         // password is displayed in clear text
 
 	search      *widget.Entry
-	list        *widget.List
+	tree        *widget.Tree
 	listEmpty   *widget.Label
 	title       *widget.Label
 	passLabel   *widget.Label
@@ -66,7 +69,8 @@ type App struct {
 	mu    sync.Mutex
 	cache map[string]*pass.Secret
 
-	clearAfter time.Duration
+	clearAfter  time.Duration
+	wasFiltered bool
 }
 
 // New builds the application UI on top of the given Fyne application.
@@ -150,29 +154,31 @@ func (a *App) build() {
 	a.search.OnChanged = func(string) { a.applyFilter() }
 	a.search.OnSubmitted = func(string) { a.selectFirst() }
 
-	a.list = widget.NewList(
-		func() int { return len(a.visible) },
-		func() fyne.CanvasObject {
-			l := widget.NewLabel("template")
-			l.Truncation = fyne.TextTruncateEllipsis
-			return l
-		},
-		func(id widget.ListItemID, o fyne.CanvasObject) {
-			if int(id) < 0 || int(id) >= len(a.visible) {
-				return
+	a.tree = widget.NewTree(
+		func(uid widget.TreeNodeID) []widget.TreeNodeID {
+			if n := a.nodes[uid]; n != nil {
+				return n.children
 			}
-			o.(*widget.Label).SetText(a.visible[id].Name)
+			return nil
 		},
+		func(uid widget.TreeNodeID) bool {
+			n := a.nodes[uid]
+			return n != nil && len(n.children) > 0
+		},
+		a.nodeCreate,
+		a.nodeUpdate,
 	)
-	a.list.OnSelected = func(id widget.ListItemID) { a.showEntry(int(id)) }
+	a.tree.OnSelected = a.treeSelected
 
 	a.listEmpty = widget.NewLabel("Хранилище пустое")
 	a.listEmpty.Alignment = fyne.TextAlignCenter
 	a.listEmpty.TextStyle = fyne.TextStyle{Italic: true}
 	a.listEmpty.Hide()
 
+	a.nodes = buildTreeNodes(nil)
+
 	left := container.NewBorder(a.search, nil, nil, nil,
-		container.NewStack(a.list, container.NewCenter(a.listEmpty)))
+		container.NewStack(a.tree, container.NewCenter(a.listEmpty)))
 
 	a.title = widget.NewLabel("")
 	a.title.TextStyle = fyne.TextStyle{Bold: true}
@@ -214,7 +220,7 @@ func (a *App) build() {
 	)
 	a.detail = container.NewPadded(detailBody)
 
-	placeholderLabel := widget.NewLabel("Выберите запись в списке слева —\nпароль будет расшифрован через pass")
+	placeholderLabel := widget.NewLabel("Выберите запись в дереве слева —\nпароль будет расшифрован через pass")
 	placeholderLabel.Alignment = fyne.TextAlignCenter
 	a.placeholder = container.NewCenter(placeholderLabel)
 
@@ -264,7 +270,7 @@ func (a *App) registerShortcuts() {
 	copyShortcut := &desktop.CustomShortcut{KeyName: fyne.KeyC, Modifier: ctrl}
 	a.win.Canvas().AddShortcut(copyShortcut, func(fyne.Shortcut) {
 		focused := a.win.Canvas().Focused()
-		if focused == nil || focused == a.list {
+		if focused == nil || focused == a.tree {
 			a.copyPassword()
 		}
 	})
@@ -288,7 +294,6 @@ func (a *App) reload() {
 			if previous != "" {
 				a.selectByName(previous)
 			}
-			a.setStatus(fmt.Sprintf("Записей: %d", len(entries)))
 		})
 	})
 }
@@ -299,16 +304,27 @@ func (a *App) setEntries(entries []pass.Entry) {
 	a.applyFilter()
 }
 
-// applyFilter recomputes a.visible from the search box.
+// applyFilter rebuilds the filtered entry list and the tree that displays it.
 func (a *App) applyFilter() {
 	q := strings.ToLower(strings.TrimSpace(a.search.Text))
+
 	a.visible = a.visible[:0]
 	for _, e := range a.entries {
 		if q == "" || strings.Contains(strings.ToLower(e.Name), q) {
 			a.visible = append(a.visible, e)
 		}
 	}
-	a.list.Refresh()
+	a.nodes = buildTreeNodes(a.visible)
+	a.tree.Refresh()
+
+	// Пока идёт поиск, раскрываем всё найденное; при сбросе поиска возвращаем
+	// дерево в компактный вид.
+	if q != "" {
+		a.tree.OpenAllBranches()
+	} else if a.wasFiltered {
+		a.tree.CloseAllBranches()
+	}
+	a.wasFiltered = q != ""
 
 	if len(a.visible) == 0 {
 		if q == "" {
@@ -317,59 +333,200 @@ func (a *App) applyFilter() {
 			a.listEmpty.SetText("Ничего не найдено")
 		}
 		a.listEmpty.Show()
-		return
+	} else {
+		a.listEmpty.Hide()
 	}
-	a.listEmpty.Hide()
+
+	a.updateCountStatus()
 }
 
-// selectFirst selects the first entry of the filtered list.
+// updateCountStatus shows how many entries are in the store and in the filter.
+func (a *App) updateCountStatus() {
+	if strings.TrimSpace(a.search.Text) == "" {
+		a.setStatus(fmt.Sprintf("Записей: %d", len(a.entries)))
+		return
+	}
+	a.setStatus(fmt.Sprintf("Найдено: %d из %d", len(a.visible), len(a.entries)))
+}
+
+// selectFirst selects the first entry matching the current filter.
 func (a *App) selectFirst() {
 	if len(a.visible) == 0 {
 		return
 	}
-	a.list.Select(0)
+	a.selectByName(a.visible[0].Name)
 }
 
-// selectByName selects the entry with the given name if it is visible.
+// selectByName opens the parent folders of name and selects the entry.
 func (a *App) selectByName(name string) {
-	for i, e := range a.visible {
-		if e.Name == name {
-			a.list.Select(i)
-			return
-		}
-	}
-}
-
-// showEntry decrypts and displays the entry at index id.
-func (a *App) showEntry(id int) {
-	if id < 0 || id >= len(a.visible) {
+	if _, ok := a.nodes[name]; !ok {
 		return
 	}
-	entry := a.visible[id]
-	a.selected = entry.Name
+	parts := strings.Split(name, "/")
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		if n := a.nodes[parent]; n != nil && len(n.children) > 0 {
+			a.tree.OpenBranch(parent)
+		}
+	}
+	a.tree.Select(name)
+	a.tree.ScrollTo(name)
+}
+
+// treeSelected handles a click on a tree row: folders expand, entries decrypt.
+func (a *App) treeSelected(uid widget.TreeNodeID) {
+	n := a.nodes[uid]
+	if n == nil {
+		return
+	}
+	if len(n.children) > 0 {
+		// Папки только раскрываются: чтобы повторный клик снова переключал
+		// ветку, выделение с папки снимается (Select не срабатывает дважды).
+		a.tree.ToggleBranch(uid)
+		a.tree.Unselect(uid)
+		return
+	}
+	if n.secret {
+		a.showEntry(uid)
+	}
+}
+
+// treeNodeInfo is one node of the folder tree: either a folder (children) or a
+// stored entry (secret).
+type treeNodeInfo struct {
+	children []string
+	secret   bool
+}
+
+// buildTreeNodes turns a flat entry list into a folder tree. The empty uid is
+// the invisible root, so its children are the top-level folders.
+func buildTreeNodes(entries []pass.Entry) map[string]*treeNodeInfo {
+	nodes := map[string]*treeNodeInfo{"": {}}
+
+	for _, e := range entries {
+		parts := strings.Split(e.Name, "/")
+		parent := ""
+		for i, part := range parts {
+			_ = part
+			uid := strings.Join(parts[:i+1], "/")
+			if nodes[uid] == nil {
+				nodes[uid] = &treeNodeInfo{}
+				nodes[parent].children = append(nodes[parent].children, uid)
+			}
+			if i == len(parts)-1 {
+				nodes[uid].secret = true
+			}
+			parent = uid
+		}
+	}
+
+	for _, n := range nodes {
+		sort.Slice(n.children, func(i, j int) bool {
+			bi := len(nodes[n.children[i]].children) > 0
+			bj := len(nodes[n.children[j]].children) > 0
+			if bi != bj {
+				return bi // папки идут раньше записей
+			}
+			return n.children[i] < n.children[j]
+		})
+	}
+	return nodes
+}
+
+// nodeCreate builds the template used for a tree row.
+func (a *App) nodeCreate(branch bool) fyne.CanvasObject {
+	icon := widget.NewIcon(theme.FolderIcon())
+	if !branch {
+		icon.SetResource(theme.DocumentIcon())
+	}
+	label := widget.NewLabel("")
+	label.Truncation = fyne.TextTruncateEllipsis
+	label.TextStyle = fyne.TextStyle{Bold: branch}
+	// Небольшой отступ между иконкой и подписью.
+	gap := canvas.NewRectangle(color.Transparent)
+	gap.SetMinSize(fyne.NewSize(4, 1))
+
+	// Border даёт подписи всю оставшуюся ширину строки, поэтому длинные имена
+	// обрезаются многоточием, а не сжимаются в ноль.
+	return container.NewBorder(nil, nil, container.NewHBox(icon, gap), nil, label)
+}
+
+// nodeUpdate fills a tree row with the node's name and icon.
+func (a *App) nodeUpdate(uid widget.TreeNodeID, branch bool, o fyne.CanvasObject) {
+	icon, label := rowParts(o)
+	if icon == nil || label == nil {
+		return
+	}
+
+	label.SetText(baseName(uid))
+	label.TextStyle = fyne.TextStyle{Bold: branch}
+	if branch {
+		icon.SetResource(theme.FolderIcon())
+	} else {
+		icon.SetResource(theme.DocumentIcon())
+	}
+}
+
+// rowParts finds the icon and label of a tree row template, which nests them in
+// a Border container.
+func rowParts(o fyne.CanvasObject) (*widget.Icon, *widget.Label) {
+	var icon *widget.Icon
+	var label *widget.Label
+
+	var walk func(fyne.CanvasObject)
+	walk = func(obj fyne.CanvasObject) {
+		switch v := obj.(type) {
+		case *widget.Icon:
+			icon = v
+		case *widget.Label:
+			label = v
+		case *fyne.Container:
+			for _, child := range v.Objects {
+				walk(child)
+			}
+		}
+	}
+	walk(o)
+	return icon, label
+}
+
+// baseName returns the last path segment of a tree uid.
+func baseName(uid string) string {
+	if i := strings.LastIndexByte(uid, '/'); i >= 0 {
+		return uid[i+1:]
+	}
+	return uid
+}
+
+// showEntry decrypts and displays the entry with the given name.
+func (a *App) showEntry(name string) {
+	if name == "" {
+		return
+	}
+	a.selected = name
 	a.current = nil
 	a.revealed = false
 
-	a.title.SetText(entry.Name)
+	a.title.SetText(name)
 	a.passLabel.SetText("")
 	a.details.SetText("")
 	a.revealBtn.SetText("Показать")
 	a.revealBtn.Disable()
 	a.copyBtn.Disable()
 	a.showDetail(true)
-	a.setStatus("Расшифровка " + entry.Name + "…")
+	a.setStatus("Расшифровка " + name + "…")
 
 	a.async(func() {
-		secret, err := a.secret(entry.Name)
+		secret, err := a.secret(name)
 		a.uiDo(func() {
-			if a.selected != entry.Name {
+			if a.selected != name {
 				return // a newer selection won the race
 			}
 			if err != nil {
 				a.current = nil
 				a.passLabel.SetText("—")
 				a.details.SetText("")
-				a.setStatus("Ошибка расшифровки " + entry.Name)
+				a.setStatus("Ошибка расшифровки " + name)
 				a.report(err)
 				return
 			}

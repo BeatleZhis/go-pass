@@ -217,3 +217,121 @@ func TestEntryExists(t *testing.T) {
 		t.Error("apps/nope не должна существовать")
 	}
 }
+
+func TestBuildTreeNodes(t *testing.T) {
+	entries := []pass.Entry{
+		{Name: "personal/mail"},
+		{Name: "personal/messenger"},
+		{Name: "dev/github"},
+		{Name: "cloud/aws/root"},
+		{Name: "cloud/aws/deploy"},
+		{Name: "single"},
+	}
+	nodes := buildTreeNodes(entries)
+
+	root := nodes[""]
+	if root == nil {
+		t.Fatal("нет корневого узла")
+	}
+	// Папки идут раньше записей, внутри группы — по алфавиту.
+	wantRoot := "cloud,dev,personal,single"
+	if got := strings.Join(root.children, ","); got != wantRoot {
+		t.Errorf("верхний уровень = %q, want %q", got, wantRoot)
+	}
+
+	if got := strings.Join(nodes["personal"].children, ","); got != "personal/mail,personal/messenger" {
+		t.Errorf("apps = %q", got)
+	}
+	if !nodes["personal/mail"].secret {
+		t.Error("personal/mail должна быть записью")
+	}
+	if nodes["personal"].secret {
+		t.Error("apps — папка, а не запись")
+	}
+	if got := strings.Join(nodes["cloud"].children, ","); got != "cloud/aws" {
+		t.Errorf("cloud = %q", got)
+	}
+	if got := strings.Join(nodes["cloud/aws"].children, ","); got != "cloud/aws/root,cloud/aws/deploy" {
+		t.Errorf("cloud/aws = %q", got)
+	}
+	if !nodes["single"].secret || len(nodes["single"].children) != 0 {
+		t.Error("single должна быть записью без детей")
+	}
+
+	// Запись может быть одновременно папкой (pass это позволяет).
+	both := buildTreeNodes([]pass.Entry{{Name: "cloud"}, {Name: "cloud/root"}})
+	if !both["cloud"].secret {
+		t.Error("cloud должна быть и записью")
+	}
+	if got := strings.Join(both["cloud"].children, ","); got != "cloud/root" {
+		t.Errorf("дети cloud = %q", got)
+	}
+
+	if len(buildTreeNodes(nil)[""].children) != 0 {
+		t.Error("пустой store должен давать пустой корень")
+	}
+}
+
+func TestTreeFoldersToggleAndEntriesOpen(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	if got := strings.Join(a.nodes[""].children, ","); got != "cloud,dev,personal" {
+		t.Fatalf("верхний уровень = %q", got)
+	}
+
+	// Клик по папке раскрывает её и не выбирает запись.
+	a.tree.Select("cloud")
+	if !a.tree.IsBranchOpen("cloud") {
+		t.Error("папка не раскрылась")
+	}
+	if a.selected != "" {
+		t.Errorf("папка не должна открывать запись: %q", a.selected)
+	}
+
+	// Повторный клик сворачивает.
+	a.tree.Select("cloud")
+	if a.tree.IsBranchOpen("cloud") {
+		t.Error("папка не свернулась")
+	}
+
+	// Клик по записи расшифровывает её.
+	a.tree.Select("personal/mail")
+	if a.current == nil || a.current.Name != "personal/mail" {
+		t.Fatalf("запись не открылась: %+v", a.current)
+	}
+}
+
+func TestTreeFilterExpandsMatches(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.search.SetText("aws")
+	if len(a.visible) != 1 || a.visible[0].Name != "cloud/aws/root" {
+		t.Fatalf("фильтр: %+v", a.visible)
+	}
+	if !a.tree.IsBranchOpen("cloud") || !a.tree.IsBranchOpen("cloud/aws") {
+		t.Error("ветки с совпадениями должны раскрыться")
+	}
+	if _, ok := a.nodes["personal"]; ok {
+		t.Error("в отфильтрованном дереве не должно быть apps")
+	}
+
+	a.search.SetText("")
+	if a.tree.IsBranchOpen("cloud") {
+		t.Error("после сброса поиска дерево должно свернуться")
+	}
+	if len(a.nodes[""].children) != 3 {
+		t.Errorf("после сброса поиска верхний уровень = %v", a.nodes[""].children)
+	}
+}
+
+func TestSelectByNameOpensAncestors(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.selectByName("cloud/aws/root")
+	if !a.tree.IsBranchOpen("cloud") || !a.tree.IsBranchOpen("cloud/aws") {
+		t.Error("родительские папки не раскрылись")
+	}
+	if a.current == nil || a.current.Name != "cloud/aws/root" {
+		t.Fatalf("запись не открылась: %+v", a.current)
+	}
+}

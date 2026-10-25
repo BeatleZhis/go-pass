@@ -26,6 +26,9 @@ func TestVisualStates(t *testing.T) {
 		"cloud/aws/root": "charlie-pass\nlogin: root\nurl: https://aws.example\n\nroot-доступ, менять только через панель\n",
 		"cloud/aws/deploy":  "delta-pass\n",
 		"dev/gitlab/app":     "echo-pass\nlogin: alice\n",
+		"dev/gitlab/vpn":        "foxtrot-pass\nlogin: vpn-user\n",
+		"work/vpn/alice":     "golf-pass\n",
+		"bank/admin":       "hotel-pass\n",
 	})
 
 	a, err := New(test.NewTempApp(t), Options{
@@ -39,7 +42,7 @@ func TestVisualStates(t *testing.T) {
 	}
 	a.Window().Resize(fyne.NewSize(1040, 680))
 	a.Window().Show()
-	if len(a.visible) != 6 {
+	if len(a.visible) != 9 {
 		t.Fatalf("список: %+v", a.visible)
 	}
 
@@ -54,7 +57,7 @@ func TestVisualStates(t *testing.T) {
 		}
 	}
 
-	save("01-empty.png")
+	save("01-tree.png")
 
 	a.selectByName("cloud/aws/root")
 	if a.current == nil {
@@ -67,9 +70,12 @@ func TestVisualStates(t *testing.T) {
 	a.toggleReveal()
 
 	a.search.SetText("vpn")
-	save("04-noresults.png")
+	save("04-search-vpn.png")
+
+	a.search.SetText("нет-такого")
+	save("05-noresults.png")
 	a.search.SetText("")
 
 	a.showAddDialog()
-	save("05-add-dialog.png")
+	save("06-add-dialog.png")
 }
