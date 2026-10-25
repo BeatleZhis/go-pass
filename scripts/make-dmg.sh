@@ -21,9 +21,13 @@ ln -s /Applications "$stage/Applications"
 rm -f "$out"
 
 # На macOS 26+ hdiutil create объявлен устаревшим, есть diskutil image create.
-if diskutil image create from --help >/dev/null 2>&1; then
-	diskutil image create from --format UDZO --volumeName "$volume" "$stage" "$out" >/dev/null
+# Если новый вариант недоступен или почему-то не сработал — откатываемся
+# на проверенный hdiutil, чтобы релиз не падал.
+if diskutil image create from --help >/dev/null 2>&1 &&
+	diskutil image create from --format UDZO --volumeName "$volume" "$stage" "$out" >/dev/null 2>&1; then
+	:
 else
+	rm -f "$out"
 	hdiutil create -volname "$volume" -srcfolder "$stage" -ov -format UDZO "$out" >/dev/null
 fi
 
