@@ -55,6 +55,17 @@ type Secret struct {
 	Raw string
 }
 
+// Extra returns everything after the password line: the "Key: value" metadata
+// and the free-form notes, exactly as stored. It is what the edit dialog puts
+// into the "details" field.
+func (s *Secret) Extra() string {
+	body := strings.ReplaceAll(s.Raw, "\r\n", "\n")
+	if i := strings.IndexByte(body, '\n'); i >= 0 {
+		return strings.TrimRight(body[i+1:], "\n")
+	}
+	return ""
+}
+
 // Store talks to a password store directory through the `pass` CLI.
 type Store struct {
 	// Binary is the absolute path to the pass executable.

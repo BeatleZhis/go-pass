@@ -64,6 +64,7 @@ type App struct {
 	details     *widget.Label
 	revealBtn   *widget.Button
 	copyBtn     *widget.Button
+	editBtn     *widget.Button
 	toggleBtn   *widget.Button
 	status      *widget.Label
 	placeholder fyne.CanvasObject
@@ -230,6 +231,10 @@ func (a *App) build() {
 	a.copyBtn.Importance = widget.HighImportance
 	a.copyBtn.Disable()
 
+	a.editBtn = widget.NewButtonWithIcon("Редактировать", theme.DocumentCreateIcon(), a.showEditDialog)
+	a.editBtn.Importance = widget.LowImportance
+	a.editBtn.Disable()
+
 	copyAllBtn := widget.NewButtonWithIcon("Копировать всё", theme.ContentCopyIcon(), a.copyAll)
 	copyAllBtn.Importance = widget.LowImportance
 
@@ -241,7 +246,7 @@ func (a *App) build() {
 	passwordBox := container.NewVBox(
 		sectionLabel("ПАРОЛЬ"),
 		container.NewBorder(nil, nil, nil, container.NewHBox(a.revealBtn, copyAllBtn), a.passLabel),
-		container.NewHBox(a.copyBtn),
+		container.NewHBox(a.copyBtn, a.editBtn),
 		widget.NewSeparator(),
 		sectionLabel("МЕТАДАННЫЕ И ЗАМЕТКИ"),
 	)
@@ -329,6 +334,9 @@ func (a *App) registerShortcuts() {
 			a.copyPassword()
 		}
 	})
+
+	edit := &desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: ctrl}
+	a.win.Canvas().AddShortcut(edit, func(fyne.Shortcut) { a.showEditDialog() })
 
 	find := &desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: ctrl}
 	a.win.Canvas().AddShortcut(find, func(fyne.Shortcut) { a.win.Canvas().Focus(a.search) })
@@ -432,6 +440,9 @@ func (a *App) selectByName(name string) {
 			a.tree.OpenBranch(parent)
 		}
 	}
+	// Снимаем выделение, чтобы Select гарантированно вызвал OnSelected: иначе
+	// повторный выбор той же записи (например, после правки) ничего не обновит.
+	a.tree.Unselect(name)
 	a.tree.Select(name)
 	a.tree.ScrollTo(name)
 }
@@ -755,6 +766,7 @@ func (a *App) showEntry(name string) {
 	a.revealBtn.SetText("Показать")
 	a.revealBtn.Disable()
 	a.copyBtn.Disable()
+	a.editBtn.Disable()
 	a.showDetail(true)
 	a.setStatus("Расшифровка " + name + "…")
 
@@ -786,6 +798,7 @@ func (a *App) render(secret *pass.Secret) {
 	a.details.SetText(descriptionText(secret))
 	a.revealBtn.Enable()
 	a.copyBtn.Enable()
+	a.editBtn.Enable()
 	a.showDetail(true)
 	a.setStatus(fmt.Sprintf("%s: пароль из %d символов", secret.Name, len([]rune(secret.Password))))
 }
@@ -837,6 +850,13 @@ func (a *App) secret(name string) (*pass.Secret, error) {
 	a.cache[name] = s
 	a.mu.Unlock()
 	return s, nil
+}
+
+// cacheDelete drops the decrypted copy of one entry, e.g. after editing it.
+func (a *App) cacheDelete(name string) {
+	a.mu.Lock()
+	delete(a.cache, name)
+	a.mu.Unlock()
 }
 
 func (a *App) cacheReset() {
@@ -898,6 +918,91 @@ type addFormState struct {
 	notes    string
 }
 
+// editFormState keeps what the user typed, so a validation error does not throw
+// the edit form away.
+type editFormState struct {
+	password string
+	extra    string
+}
+
+// showEditDialog opens the editor for the selected entry.
+func (a *App) showEditDialog() {
+	if a.current == nil || a.current.Name != a.selected {
+		a.setStatus("Сначала выберите запись")
+		return
+	}
+	a.showEditForm(a.current.Name, editFormState{
+		password: a.current.Password,
+		extra:    a.current.Extra(),
+	})
+}
+
+// showEditForm renders the editor, optionally prefilled.
+func (a *App) showEditForm(name string, state editFormState) {
+	pwdEntry := widget.NewPasswordEntry()
+	pwdEntry.TextStyle = fyne.TextStyle{Monospace: true}
+	pwdEntry.SetText(state.password)
+
+	extraEntry := widget.NewMultiLineEntry()
+	extraEntry.TextStyle = fyne.TextStyle{Monospace: true}
+	extraEntry.SetPlaceHolder("login: user@example.com\nurl: https://example.com\n\nзаметки")
+	extraEntry.SetMinRowsVisible(6)
+	extraEntry.SetText(state.extra)
+
+	nameLabel := widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+
+	hint := widget.NewLabel("Первая строка — пароль, остальное — метаданные и заметки.")
+	hint.Wrapping = fyne.TextWrapWord
+	hint.TextStyle = fyne.TextStyle{Italic: true}
+
+	form := container.NewVBox(
+		widget.NewLabel("Запись"),
+		nameLabel,
+		widget.NewLabel("Пароль"),
+		pwdEntry,
+		widget.NewLabel("Дополнительно"),
+		extraEntry,
+		hint,
+	)
+
+	d := dialog.NewCustomConfirm("Редактирование записи", "Сохранить", "Отмена", form, func(ok bool) {
+		if !ok {
+			return
+		}
+		if err := a.applyEdit(name, pwdEntry.Text, extraEntry.Text); err != nil {
+			a.setStatus(err.Error())
+			dialog.ShowError(err, a.win)
+			// Возвращаем форму с введёнными данными, чтобы не терять правки.
+			a.showEditForm(name, editFormState{password: pwdEntry.Text, extra: extraEntry.Text})
+		}
+	}, a.win)
+	d.Resize(fyne.NewSize(580, 500))
+	d.Show()
+	a.win.Canvas().Focus(pwdEntry)
+}
+
+// applyEdit overwrites an existing entry with new content. `pass insert
+// --force` keeps recipients, git commit and hooks intact.
+func (a *App) applyEdit(name, password, extra string) error {
+	if name == "" {
+		return errors.New("запись не выбрана")
+	}
+	if strings.TrimSpace(password) == "" {
+		return errors.New("пароль не может быть пустым")
+	}
+
+	content := password
+	extra = strings.TrimRight(strings.ReplaceAll(extra, "\r\n", "\n"), "\n")
+	if strings.TrimSpace(extra) != "" {
+		content += "\n" + extra
+	}
+
+	// Старое расшифрованное значение больше не актуально.
+	a.cacheDelete(name)
+	a.saveEntry(name, content, true)
+	return nil
+}
+
 // showAddDialog asks for a name and content, then stores the entry.
 func (a *App) showAddDialog() {
 	a.showAddForm(addFormState{})
@@ -906,7 +1011,7 @@ func (a *App) showAddDialog() {
 // showAddForm renders the "new entry" dialog, optionally prefilled.
 func (a *App) showAddForm(state addFormState) {
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("например: cloud/aws/root")
+	nameEntry.SetPlaceHolder("например: personal/mail")
 	nameEntry.SetText(state.name)
 	nameEntry.Validator = func(s string) error {
 		if strings.TrimSpace(s) == "" {
@@ -1043,7 +1148,14 @@ func (a *App) entryExists(name string) bool {
 }
 
 // save stores the entry in the background and refreshes the list afterwards.
+// The search filter is reset so the new entry is visible.
 func (a *App) save(name, content string) {
+	a.saveEntry(name, content, false)
+}
+
+// saveEntry writes content to the store. keepFilter keeps the search box as is,
+// which is what editing an existing entry wants.
+func (a *App) saveEntry(name, content string, keepFilter bool) {
 	progress := dialog.NewCustomWithoutButtons("Сохранение",
 		container.NewVBox(
 			widget.NewProgressBarInfinite(),
@@ -1064,13 +1176,13 @@ func (a *App) save(name, content string) {
 				return
 			}
 			a.setStatus("Запись «" + name + "» сохранена")
-			a.refreshAndSelect(name)
+			a.refreshAndSelect(name, keepFilter)
 		})
 	})
 }
 
 // refreshAndSelect reloads the listing and selects the given entry.
-func (a *App) refreshAndSelect(name string) {
+func (a *App) refreshAndSelect(name string, keepFilter bool) {
 	a.async(func() {
 		entries, err := a.store.List()
 		a.uiDo(func() {
@@ -1078,7 +1190,9 @@ func (a *App) refreshAndSelect(name string) {
 				a.report(err)
 				return
 			}
-			a.search.SetText("")
+			if !keepFilter {
+				a.search.SetText("")
+			}
 			a.setEntries(entries)
 			a.selectByName(name)
 			a.setStatus(fmt.Sprintf("Записей: %d", len(entries)))

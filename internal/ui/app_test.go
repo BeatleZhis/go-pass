@@ -32,14 +32,17 @@ func fakeStore(t *testing.T, entries map[string]string) (*pass.Store, string) {
 	storeDir := filepath.Join(dir, "store")
 	inserted := filepath.Join(dir, "inserted")
 
-	script := "#!/bin/sh\ncase \"$1\" in\nshow)\n  case \"$2\" in\n"
+	// show отдаёт содержимое .gpg, если оно уже записано (после insert), иначе
+	// заранее заданный текст. insert записывает stdin и в файл хранилища, и в
+	// файл inserted, чтобы тесты могли проверить оба сценария.
+	script := "#!/bin/sh\ncase \"$1\" in\nshow)\n  f='" + storeDir + "'/\"$2.gpg\"\n  if [ -s \"$f\" ]; then cat \"$f\"; else\n    case \"$2\" in\n"
 	i := 0
 	for name, content := range entries {
 		p := filepath.Join(storeDir, filepath.FromSlash(name)+".gpg")
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(p, []byte("encrypted"), 0o600); err != nil {
+		if err := os.WriteFile(p, nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 
@@ -47,11 +50,11 @@ func fakeStore(t *testing.T, entries map[string]string) (*pass.Store, string) {
 		if err := os.WriteFile(contentFile, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		script += fmt.Sprintf("    '%s') cat '%s' ;;\n", name, contentFile)
+		script += fmt.Sprintf("      '%s') cat '%s' ;;\n", name, contentFile)
 		i++
 	}
-	script += "    *) printf 'temp-pass\\nlogin: temp\\n' ;;\n  esac ;;\n"
-	script += "insert) cat > '" + inserted + "'; name=\"$4\"; mkdir -p '" + storeDir + "'/\"$(dirname \"$name\")\"; : > '" + storeDir + "'/\"$name.gpg\" ;;\n"
+	script += "      *) printf 'temp-pass\\nlogin: temp\\n' ;;\n    esac\n  fi ;;\n"
+	script += "insert) cat > '" + inserted + "'; name=\"$4\"; mkdir -p '" + storeDir + "'/\"$(dirname \"$name\")\"; cp '" + inserted + "' '" + storeDir + "'/\"$name.gpg\" ;;\n"
 	script += "*) exit 1 ;;\nesac\n"
 
 	bin := filepath.Join(dir, "pass")
@@ -65,8 +68,8 @@ func newTestApp(t *testing.T) (*App, *memClipboard) {
 	t.Helper()
 
 	store, _ := fakeStore(t, map[string]string{
-		"personal/mail":          "alpha-pass\nlogin: max\n",
-		"dev/github":        "bravo-pass\nlogin: octo\nurl: https://github.com\n",
+		"personal/mail":  "alpha-pass\nlogin: max\n",
+		"dev/github":     "bravo-pass\nlogin: octo\nurl: https://example.com\n",
 		"cloud/aws/root": "charlie-pass\nlogin: root\n\nзаметка\n",
 	})
 
@@ -89,8 +92,8 @@ func newTestApp(t *testing.T) (*App, *memClipboard) {
 func TestAppListsAndFilters(t *testing.T) {
 	a, _ := newTestApp(t)
 
-	if got := a.visible[0].Name; got != "personal/mail" {
-		t.Errorf("первая запись = %q, want personal/mail", got)
+	if got := a.visible[0].Name; got != "cloud/aws/root" {
+		t.Errorf("первая запись = %q, want cloud/aws/root", got)
 	}
 	if len(a.existingDirs()) == 0 {
 		t.Errorf("папки хранилища не определены")
@@ -168,8 +171,8 @@ func TestAppSaveStoresEntry(t *testing.T) {
 		t.Fatalf("исходный список: %+v", a.visible)
 	}
 
-	a.save("github/new", "fresh-pass\nlogin: me")
-	if len(a.visible) != 2 || a.selected != "github/new" {
+	a.save("dev/new", "fresh-pass\nlogin: me")
+	if len(a.visible) != 2 || a.selected != "dev/new" {
 		t.Fatalf("после сохранения список=%+v selected=%q", a.visible, a.selected)
 	}
 
@@ -213,8 +216,8 @@ func TestEntryExists(t *testing.T) {
 	if !a.entryExists("personal/mail") {
 		t.Error("personal/mail должна существовать")
 	}
-	if a.entryExists("apps/nope") {
-		t.Error("apps/nope не должна существовать")
+	if a.entryExists("personal/nope") {
+		t.Error("personal/nope не должна существовать")
 	}
 }
 
@@ -240,18 +243,18 @@ func TestBuildTreeNodes(t *testing.T) {
 	}
 
 	if got := strings.Join(nodes["personal"].children, ","); got != "personal/mail,personal/messenger" {
-		t.Errorf("apps = %q", got)
+		t.Errorf("personal = %q", got)
 	}
 	if !nodes["personal/mail"].secret {
 		t.Error("personal/mail должна быть записью")
 	}
 	if nodes["personal"].secret {
-		t.Error("apps — папка, а не запись")
+		t.Error("personal — папка, а не запись")
 	}
 	if got := strings.Join(nodes["cloud"].children, ","); got != "cloud/aws" {
 		t.Errorf("cloud = %q", got)
 	}
-	if got := strings.Join(nodes["cloud/aws"].children, ","); got != "cloud/aws/root,cloud/aws/deploy" {
+	if got := strings.Join(nodes["cloud/aws"].children, ","); got != "cloud/aws/deploy,cloud/aws/root" {
 		t.Errorf("cloud/aws = %q", got)
 	}
 	if !nodes["single"].secret || len(nodes["single"].children) != 0 {
@@ -312,7 +315,7 @@ func TestTreeFilterExpandsMatches(t *testing.T) {
 		t.Error("ветки с совпадениями должны раскрыться")
 	}
 	if _, ok := a.nodes["personal"]; ok {
-		t.Error("в отфильтрованном дереве не должно быть apps")
+		t.Error("в отфильтрованном дереве не должно быть personal")
 	}
 
 	a.search.SetText("")
@@ -348,14 +351,14 @@ func TestTreeFolderCounts(t *testing.T) {
 	nodes := buildTreeNodes(entries)
 
 	tests := map[string]int{
-		"":                  6,
-		"personal":              2,
-		"personal/mail":          1,
+		"":               6,
+		"personal":       2,
+		"personal/mail":  1,
 		"dev":            1,
-		"cloud":           2,
+		"cloud":          2,
 		"cloud/aws":      2,
 		"cloud/aws/root": 1,
-		"single":            1,
+		"single":         1,
 	}
 	for uid, want := range tests {
 		if got := nodes[uid].count; got != want {
@@ -373,15 +376,15 @@ func TestTreeRowShowsCount(t *testing.T) {
 	if label == nil {
 		t.Fatal("в строке нет подписи")
 	}
-	if got := label.Text(); got != "apps (1)" {
-		t.Errorf("подпись папки = %q, want %q", got, "apps (1)")
+	if got := label.Text(); got != "personal (1)" {
+		t.Errorf("подпись папки = %q, want %q", got, "personal (1)")
 	}
 
 	leaf := a.nodeCreate(false)
 	a.nodeUpdate("personal/mail", false, leaf)
 	_, leafLabel := rowParts(leaf)
-	if got := leafLabel.Text(); got != "max" {
-		t.Errorf("подпись записи = %q, want max", got)
+	if got := leafLabel.Text(); got != "mail" {
+		t.Errorf("подпись записи = %q, want mail", got)
 	}
 }
 
@@ -406,10 +409,10 @@ func TestExpandAndCollapseAll(t *testing.T) {
 func TestExpandedBranchesPersist(t *testing.T) {
 	fyneApp := test.NewTempApp(t)
 	store, _ := fakeStore(t, map[string]string{
-		"personal/mail":          "alpha-pass\n",
-		"personal/messenger":     "tango-pass\n",
-		"dev/github":        "bravo-pass\n",
-		"cloud/aws/root": "charlie-pass\n",
+		"personal/mail":      "alpha-pass\n",
+		"personal/messenger": "tango-pass\n",
+		"dev/github":         "bravo-pass\n",
+		"cloud/aws/root":     "charlie-pass\n",
 	})
 	clip := clipboard.NewWithClipboard(&memClipboard{}, 0)
 
@@ -461,7 +464,7 @@ func TestFilterKeepsUnrelatedOpenFolders(t *testing.T) {
 
 	// В результатах поиска нет открытых веток — состояние всё равно должно
 	// пережить поиск.
-	a.search.SetText("2fa")
+	a.search.SetText("dev")
 	if !a.tree.IsBranchOpen("dev") {
 		t.Error("ветка с совпадением не раскрылась")
 	}
@@ -517,5 +520,105 @@ func TestTreeToggleFollowsManualExpansion(t *testing.T) {
 	a.tree.Select("dev")
 	if got := a.toggleBtn.Text; got != "Развернуть" {
 		t.Errorf("подпись = %q, want Развернуть", got)
+	}
+}
+
+func TestEditEntryRoundTrip(t *testing.T) {
+	store, inserted := fakeStore(t, map[string]string{
+		"personal/mail": "old-pass\nlogin: old\n",
+		"dev/github":    "two-pass\n",
+	})
+	a, err := New(test.NewTempApp(t), Options{
+		Store: store,
+		Clip:  clipboard.NewWithClipboard(&memClipboard{}, time.Minute),
+		Sync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Window().Resize(fyne.NewSize(900, 600))
+	a.Window().Show()
+
+	// Без выбранной записи редактирование недоступно.
+	if !a.editBtn.Disabled() {
+		t.Error("кнопка редактирования должна быть неактивна без выбора")
+	}
+
+	a.selectByName("personal/mail")
+	if a.current == nil {
+		t.Fatal("запись не расшифрована")
+	}
+	if a.editBtn.Disabled() {
+		t.Error("кнопка редактирования должна быть активна для выбранной записи")
+	}
+	if got := a.current.Extra(); got != "login: old" {
+		t.Fatalf("Extra() = %q", got)
+	}
+
+	if err := a.applyEdit("personal/mail", "new-Pass-42", "login: edited\nurl: https://example.org"); err != nil {
+		t.Fatalf("applyEdit: %v", err)
+	}
+
+	// В pass ушло новое содержимое: пароль + метаданные.
+	body, err := os.ReadFile(inserted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "new-Pass-42\nlogin: edited\nurl: https://example.org\n"
+	if string(body) != want {
+		t.Errorf("в pass ушло %q, want %q", string(body), want)
+	}
+
+	// Запись перечитана: показывается новый пароль и новые метаданные.
+	if a.current == nil || a.current.Password != "new-Pass-42" {
+		t.Fatalf("после правки current = %+v", a.current)
+	}
+	if got := a.details.Text; !strings.Contains(got, "login: edited") {
+		t.Errorf("метаданные не обновились: %q", got)
+	}
+	if len(a.visible) != 2 {
+		t.Errorf("список изменился после правки: %+v", a.visible)
+	}
+}
+
+func TestApplyEditValidates(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	for _, tc := range []struct {
+		name     string
+		password string
+	}{
+		{"", "secret"},
+		{"personal/mail", ""},
+		{"personal/mail", "   "},
+	} {
+		if err := a.applyEdit(tc.name, tc.password, ""); err == nil {
+			t.Errorf("applyEdit(%q, %q) не вернул ошибку", tc.name, tc.password)
+		}
+	}
+}
+
+func TestEditKeepsSearchFilter(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.search.SetText("mail")
+	if len(a.visible) != 1 || a.visible[0].Name != "personal/mail" {
+		t.Fatalf("фильтр: %+v", a.visible)
+	}
+	a.selectByName("personal/mail")
+
+	if err := a.applyEdit("personal/mail", "brand-new", ""); err != nil {
+		t.Fatalf("applyEdit: %v", err)
+	}
+
+	// Правка не должна сбрасывать поиск: запись остаётся видимой и выбранной.
+	if a.search.Text != "mail" {
+		t.Errorf("поиск сброшен: %q", a.search.Text)
+	}
+	if len(a.visible) != 1 || a.visible[0].Name != "personal/mail" {
+		t.Errorf("после правки видимые записи = %+v", a.visible)
+	}
+	if a.current == nil || a.current.Password != "brand-new" {
+		t.Errorf("после правки current = %+v", a.current)
 	}
 }

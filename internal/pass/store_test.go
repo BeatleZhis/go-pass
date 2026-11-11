@@ -227,3 +227,23 @@ func TestValidateName(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretExtra(t *testing.T) {
+	raw := "p@ss\nlogin: user\nurl: https://example.com\n\nзаметка\nвторая строка\n"
+	sec := ParseSecret("demo", raw)
+
+	want := "login: user\nurl: https://example.com\n\nзаметка\nвторая строка"
+	if got := sec.Extra(); got != want {
+		t.Errorf("Extra() = %q, want %q", got, want)
+	}
+
+	// Запись без метаданных: остаток пустой.
+	if got := ParseSecret("x", "only-pass\n").Extra(); got != "" {
+		t.Errorf("Extra() = %q, want empty", got)
+	}
+
+	// CRLF нормализуется, хвостовые переводы строк отбрасываются.
+	if got := ParseSecret("x", "p\r\nlogin: u\r\n").Extra(); got != "login: u" {
+		t.Errorf("Extra() с CRLF = %q", got)
+	}
+}
