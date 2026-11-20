@@ -712,3 +712,25 @@ func TestDeleteLastEntryInFolderPrunesTreeAndPrefs(t *testing.T) {
 		t.Errorf("статус-бар должен сообщать об удалении записи, получено: %q", a.status.Text)
 	}
 }
+
+func TestDeleteWhileFilteringForgetsRemovedBranch(t *testing.T) {
+	a, _ := newTestApp(t) // cloud/aws/root, dev/github, personal/mail
+
+	a.tree.Select("cloud") // раскрыли ветку
+	a.search.SetText("root")
+	if len(a.visible) != 1 || a.visible[0].Name != "cloud/aws/root" {
+		t.Fatalf("фильтр: %+v", a.visible)
+	}
+	a.selectByName("cloud/aws/root")
+	a.deleteEntry("cloud/aws/root")
+
+	if _, ok := a.nodes["cloud"]; ok {
+		t.Error("опустевшая папка cloud должна исчезнуть из дерева")
+	}
+
+	// После сброса поиска ветка не должна «воскреснуть» из savedOpen.
+	a.search.SetText("")
+	if a.tree.IsBranchOpen("cloud") {
+		t.Error("ветка удалённой папки не должна раскрываться после поиска")
+	}
+}

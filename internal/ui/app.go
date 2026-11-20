@@ -345,8 +345,9 @@ func (a *App) registerShortcuts() {
 
 	del := &desktop.CustomShortcut{KeyName: fyne.KeyBackspace, Modifier: ctrl}
 	a.win.Canvas().AddShortcut(del, func(fyne.Shortcut) {
-		focused := a.win.Canvas().Focused()
-		if focused == nil || focused == a.tree {
+		// Только когда фокус в дереве: при открытом диалоге без фокуса
+		// (прогресс, подтверждение) удалять ничего нельзя.
+		if a.win.Canvas().Focused() == a.tree {
 			a.confirmDelete()
 		}
 	})
@@ -1025,16 +1026,19 @@ func (a *App) confirmDelete() {
 		return
 	}
 	name := a.selected
-	dialog.ShowConfirm(
-		"Удалить запись?",
-		fmt.Sprintf("Запись «%s» будет удалена без возможности восстановления.", name),
-		func(yes bool) {
-			if yes {
-				a.deleteEntry(name)
-			}
-		},
-		a.win,
-	)
+
+	message := widget.NewLabel(fmt.Sprintf(
+		"Запись «%s» будет удалена из хранилища.\nВернуть её из приложения нельзя.", name))
+	message.Wrapping = fyne.TextWrapWord
+
+	d := dialog.NewCustomConfirm("Удалить запись?", "Удалить", "Отмена", message, func(yes bool) {
+		if yes {
+			a.deleteEntry(name)
+		}
+	}, a.win)
+	d.SetConfirmImportance(widget.DangerImportance)
+	d.Resize(fyne.NewSize(460, 200))
+	d.Show()
 }
 
 // deleteEntry removes the entry via `pass rm --force`, clears its cached
@@ -1088,6 +1092,16 @@ func (a *App) pruneStaleBranches(deletedName string) {
 			}
 		}
 	})
+	// Убираем удалённые ветки из запомненных: иначе после сброса поиска
+	// дерево попробует их раскрыть.
+	kept := a.savedOpen[:0]
+	for _, uid := range a.savedOpen {
+		if n := a.nodes[uid]; n != nil && len(n.children) > 0 {
+			kept = append(kept, uid)
+		}
+	}
+	a.savedOpen = kept
+
 	if !a.wasFiltered {
 		a.persistOpenBranches()
 	}
