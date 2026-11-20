@@ -29,6 +29,7 @@ func main() {
 	appID := flag.String("app-id", "com.github.beatlezhis.gopass", "идентификатор приложения")
 	uiScale := flag.Float64("ui-scale", float64(ui.DefaultUIScale), "плотность интерфейса: 1 — как в Fyne, меньше — компактнее")
 	versionFlag := flag.Bool("version", false, "показать версию и выйти")
+	deleteName := flag.String("delete", "", "удалить запись и выйти")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Go Pass %s — графический менеджер паролей для pass\n\n", version)
@@ -98,6 +99,14 @@ func main() {
 			}
 		}
 		clip.Stop()
+		return
+	case *deleteName != "":
+		ctx, cancel := context.WithTimeout(context.Background(), pass.DefaultTimeout)
+		defer cancel()
+		if err := store.Delete(ctx, *deleteName); err != nil {
+			fail(err)
+		}
+		fmt.Printf("Запись %s удалена\n", *deleteName)
 		return
 	}
 

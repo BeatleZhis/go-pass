@@ -88,4 +88,10 @@ func TestVisualStates(t *testing.T) {
 	b.selectByName("cloud/aws/root")
 	b.showEditDialog()
 	save(b, "07-edit-dialog.png")
+
+	c := newApp()
+	c.selectByName("cloud/aws/root")
+	c.confirmDelete()
+	save(c, "08-delete-dialog.png")
+
 }

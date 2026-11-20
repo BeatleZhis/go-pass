@@ -55,6 +55,7 @@ func fakeStore(t *testing.T, entries map[string]string) (*pass.Store, string) {
 	}
 	script += "      *) printf 'temp-pass\\nlogin: temp\\n' ;;\n    esac\n  fi ;;\n"
 	script += "insert) cat > '" + inserted + "'; name=\"$4\"; mkdir -p '" + storeDir + "'/\"$(dirname \"$name\")\"; cp '" + inserted + "' '" + storeDir + "'/\"$name.gpg\" ;;\n"
+	script += "rm) if [ \"$2\" = \"--force\" ] && [ -n \"$3\" ]; then rm -f '" + storeDir + "'/\"$3.gpg\"; else exit 1; fi ;;\n"
 	script += "*) exit 1 ;;\nesac\n"
 
 	bin := filepath.Join(dir, "pass")
@@ -620,5 +621,94 @@ func TestEditKeepsSearchFilter(t *testing.T) {
 	}
 	if a.current == nil || a.current.Password != "brand-new" {
 		t.Errorf("после правки current = %+v", a.current)
+	}
+}
+
+func TestDeleteEntryUpdatesTreeAndCache(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	if !a.deleteBtn.Disabled() {
+		t.Error("кнопка удаления должна быть неактивна без выбора")
+	}
+
+	a.selectByName("dev/github")
+	if a.current == nil || a.selected != "dev/github" {
+		t.Fatal("запись не выбрана")
+	}
+	if a.deleteBtn.Disabled() {
+		t.Error("кнопка удаления должна быть активна для выбранной записи")
+	}
+	if _, ok := a.cache["dev/github"]; !ok {
+		t.Fatal("запись должна находиться в кеше")
+	}
+
+	a.deleteEntry("dev/github")
+
+	if a.selected != "" || a.current != nil {
+		t.Errorf("выделение должно быть сброшено: selected=%q", a.selected)
+	}
+	if _, ok := a.cache["dev/github"]; ok {
+		t.Error("удалённая запись должна быть очищена из кеша")
+	}
+	if a.entryExists("dev/github") {
+		t.Error("удалённая запись не должна оставаться в хранилище")
+	}
+	if len(a.visible) != 2 {
+		t.Errorf("ожидалось 2 записи после удаления, получено %d", len(a.visible))
+	}
+	if !a.deleteBtn.Disabled() {
+		t.Error("кнопка удаления должна снова заблокироваться после сброса выбора")
+	}
+}
+
+func TestDeleteNonExistentEntryReportsError(t *testing.T) {
+	a, _ := newTestApp(t)
+
+	a.deleteEntry("dev/missing")
+	if !strings.Contains(a.status.Text, "не найдена") {
+		t.Errorf("ожидалась ошибка в статусе, получено: %q", a.status.Text)
+	}
+}
+
+func TestDeleteLastEntryInFolderPrunesTreeAndPrefs(t *testing.T) {
+	fyneApp := test.NewTempApp(t)
+	store, _ := fakeStore(t, map[string]string{
+		"personal/mail": "alpha-pass\n",
+		"dev/github":    "bravo-pass\n",
+	})
+	clip := clipboard.NewWithClipboard(&memClipboard{}, 0)
+
+	a, err := New(fyneApp, Options{Store: store, Clip: clip, Sync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Window().Resize(fyne.NewSize(900, 600))
+	a.Window().Show()
+
+	a.tree.Select("personal")
+	a.tree.Select("dev")
+	prefsBefore := fyneApp.Preferences().String(prefOpenBranches)
+	if !strings.Contains(prefsBefore, "personal") || !strings.Contains(prefsBefore, "dev") {
+		t.Fatalf("ожидались обе папки в preferences, получено: %q", prefsBefore)
+	}
+
+	a.selectByName("dev/github")
+	a.deleteEntry("dev/github")
+
+	if _, exists := a.nodes["dev"]; exists {
+		t.Error("опустевшая папка dev должна исчезнуть из дерева")
+	}
+	if a.tree.IsBranchOpen("dev") {
+		t.Error("ветка dev не должна оставаться открытой в виджете дерева")
+	}
+	prefsAfter := fyneApp.Preferences().String(prefOpenBranches)
+	if strings.Contains(prefsAfter, "dev") {
+		t.Errorf("удалённая папка dev не должна оставаться в preferences: %q", prefsAfter)
+	}
+	if !strings.Contains(prefsAfter, "personal") {
+		t.Errorf("папка personal должна сохраниться в preferences: %q", prefsAfter)
+	}
+	if !strings.Contains(a.status.Text, "dev/github") {
+		t.Errorf("статус-бар должен сообщать об удалении записи, получено: %q", a.status.Text)
 	}
 }

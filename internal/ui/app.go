@@ -65,6 +65,7 @@ type App struct {
 	revealBtn   *widget.Button
 	copyBtn     *widget.Button
 	editBtn     *widget.Button
+	deleteBtn   *widget.Button
 	toggleBtn   *widget.Button
 	status      *widget.Label
 	placeholder fyne.CanvasObject
@@ -235,6 +236,10 @@ func (a *App) build() {
 	a.editBtn.Importance = widget.LowImportance
 	a.editBtn.Disable()
 
+	a.deleteBtn = widget.NewButtonWithIcon("Удалить", theme.DeleteIcon(), a.confirmDelete)
+	a.deleteBtn.Importance = widget.DangerImportance
+	a.deleteBtn.Disable()
+
 	copyAllBtn := widget.NewButtonWithIcon("Копировать всё", theme.ContentCopyIcon(), a.copyAll)
 	copyAllBtn.Importance = widget.LowImportance
 
@@ -246,7 +251,7 @@ func (a *App) build() {
 	passwordBox := container.NewVBox(
 		sectionLabel("ПАРОЛЬ"),
 		container.NewBorder(nil, nil, nil, container.NewHBox(a.revealBtn, copyAllBtn), a.passLabel),
-		container.NewHBox(a.copyBtn, a.editBtn),
+		container.NewBorder(nil, nil, container.NewHBox(a.copyBtn, a.editBtn), a.deleteBtn),
 		widget.NewSeparator(),
 		sectionLabel("МЕТАДАННЫЕ И ЗАМЕТКИ"),
 	)
@@ -337,6 +342,14 @@ func (a *App) registerShortcuts() {
 
 	edit := &desktop.CustomShortcut{KeyName: fyne.KeyE, Modifier: ctrl}
 	a.win.Canvas().AddShortcut(edit, func(fyne.Shortcut) { a.showEditDialog() })
+
+	del := &desktop.CustomShortcut{KeyName: fyne.KeyBackspace, Modifier: ctrl}
+	a.win.Canvas().AddShortcut(del, func(fyne.Shortcut) {
+		focused := a.win.Canvas().Focused()
+		if focused == nil || focused == a.tree {
+			a.confirmDelete()
+		}
+	})
 
 	find := &desktop.CustomShortcut{KeyName: fyne.KeyF, Modifier: ctrl}
 	a.win.Canvas().AddShortcut(find, func(fyne.Shortcut) { a.win.Canvas().Focus(a.search) })
@@ -767,6 +780,7 @@ func (a *App) showEntry(name string) {
 	a.revealBtn.Disable()
 	a.copyBtn.Disable()
 	a.editBtn.Disable()
+	a.deleteBtn.Disable()
 	a.showDetail(true)
 	a.setStatus("Расшифровка " + name + "…")
 
@@ -799,6 +813,7 @@ func (a *App) render(secret *pass.Secret) {
 	a.revealBtn.Enable()
 	a.copyBtn.Enable()
 	a.editBtn.Enable()
+	a.deleteBtn.Enable()
 	a.showDetail(true)
 	a.setStatus(fmt.Sprintf("%s: пароль из %d символов", secret.Name, len([]rune(secret.Password))))
 }
@@ -1001,6 +1016,99 @@ func (a *App) applyEdit(name, password, extra string) error {
 	a.cacheDelete(name)
 	a.saveEntry(name, content, true)
 	return nil
+}
+
+// confirmDelete asks for confirmation before removing the selected entry.
+func (a *App) confirmDelete() {
+	if a.selected == "" {
+		a.setStatus("Сначала выберите запись")
+		return
+	}
+	name := a.selected
+	dialog.ShowConfirm(
+		"Удалить запись?",
+		fmt.Sprintf("Запись «%s» будет удалена без возможности восстановления.", name),
+		func(yes bool) {
+			if yes {
+				a.deleteEntry(name)
+			}
+		},
+		a.win,
+	)
+}
+
+// deleteEntry removes the entry via `pass rm --force`, clears its cached
+// secret, resets the detail pane and reloads the tree.
+func (a *App) deleteEntry(name string) {
+	a.setStatus("Удаление " + name + "…")
+
+	a.async(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), pass.DefaultTimeout)
+		defer cancel()
+		err := a.store.Delete(ctx, name)
+
+		a.uiDo(func() {
+			if err != nil {
+				a.report(err)
+				return
+			}
+			a.cacheDelete(name)
+			if a.selected == name {
+				a.clearSelection()
+			}
+			a.reloadAfterDelete(name)
+		})
+	})
+}
+
+func (a *App) reloadAfterDelete(deletedName string) {
+	a.async(func() {
+		entries, err := a.store.List()
+		a.uiDo(func() {
+			if err != nil {
+				a.report(err)
+				return
+			}
+			a.setEntries(entries)
+			a.pruneStaleBranches(deletedName)
+			a.setStatus("Запись «" + deletedName + "» удалена")
+		})
+	})
+}
+
+// pruneStaleBranches closes tree branch IDs that no longer exist in a.nodes
+// and updates persisted preferences so dead folder IDs are not kept.
+func (a *App) pruneStaleBranches(deletedName string) {
+	parts := strings.Split(deletedName, "/")
+	a.withoutPersist(func() {
+		for i := 1; i < len(parts); i++ {
+			uid := strings.Join(parts[:i], "/")
+			if n := a.nodes[uid]; n == nil || len(n.children) == 0 {
+				a.tree.CloseBranch(uid)
+			}
+		}
+	})
+	if !a.wasFiltered {
+		a.persistOpenBranches()
+	}
+}
+
+// clearSelection resets the detail pane back to the empty placeholder state.
+func (a *App) clearSelection() {
+	if a.selected != "" {
+		a.tree.Unselect(a.selected)
+	}
+	a.selected = ""
+	a.current = nil
+	a.revealed = false
+	a.title.SetText("")
+	a.passLabel.SetText("")
+	a.details.SetText("")
+	a.revealBtn.Disable()
+	a.copyBtn.Disable()
+	a.editBtn.Disable()
+	a.deleteBtn.Disable()
+	a.showDetail(false)
 }
 
 // showAddDialog asks for a name and content, then stores the entry.
