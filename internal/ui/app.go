@@ -68,6 +68,8 @@ type App struct {
 	deleteBtn   *widget.Button
 	toggleBtn   *widget.Button
 	status      *widget.Label
+	gitBtn      *widget.Button
+	missingDlg  dialog.Dialog
 	placeholder fyne.CanvasObject
 	detail      fyne.CanvasObject
 	card        fyne.CanvasObject
@@ -116,6 +118,7 @@ func New(fyneApp fyne.App, opts Options) (*App, error) {
 	a.win.Resize(a.restoredWindowSize())
 	a.win.SetMaster()
 	a.build()
+	a.applySavedBinary()
 	a.restoreOpenBranches()
 	a.registerShortcuts()
 	a.win.SetOnClosed(func() {
@@ -138,7 +141,9 @@ func Run(opts Options) error {
 	if err != nil {
 		return err
 	}
-	a.win.ShowAndRun()
+	a.win.Show()
+	a.checkEnvironment()
+	fyneApp.Run()
 	return nil
 }
 
@@ -279,7 +284,7 @@ func (a *App) build() {
 	a.status = widget.NewLabel("Готово")
 	a.status.Truncation = fyne.TextTruncateEllipsis
 
-	storeLabel := widget.NewLabel("хранилище: " + abbreviateHome(a.store.Dir))
+	storeLabel := widget.NewLabel("хранилище: " + shortenPath(abbreviateHome(a.store.Dir), 40))
 	storeLabel.TextStyle = fyne.TextStyle{Italic: true}
 	storeLabel.Alignment = fyne.TextAlignTrailing
 
@@ -314,8 +319,11 @@ func (a *App) toolbar() fyne.CanvasObject {
 	a.toggleBtn = widget.NewButtonWithIcon("Развернуть", theme.MenuExpandIcon(), a.toggleAllBranches)
 	a.toggleBtn.Importance = widget.LowImportance
 
+	a.gitBtn = widget.NewButtonWithIcon("git: …", theme.HistoryIcon(), a.confirmInitGit)
+	a.gitBtn.Importance = widget.LowImportance
+
 	bar := container.NewBorder(nil, nil,
-		container.NewHBox(addBtn, refreshBtn, a.toggleBtn), nil)
+		container.NewHBox(addBtn, refreshBtn, a.toggleBtn), a.gitBtn)
 	bg := canvas.NewRectangle(colorSidebar)
 	return container.NewVBox(
 		container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), bar)),
@@ -371,6 +379,7 @@ func (a *App) reload() {
 			if previous != "" {
 				a.selectByName(previous)
 			}
+			a.refreshGitStatus()
 		})
 	})
 }
@@ -460,6 +469,12 @@ func (a *App) selectByName(name string) {
 	a.tree.Select(name)
 	a.tree.ScrollTo(name)
 }
+
+// Preferences keys for the pass-only UX.
+const (
+	prefPassBinary = "pass.binary"
+	prefNoGitWarn  = "git.warnDisabled"
+)
 
 // prefOpenBranches is the preferences key that stores expanded folders.
 const prefOpenBranches = "tree.openBranches"
@@ -1349,6 +1364,19 @@ func sectionLabel(text string) fyne.CanvasObject {
 	label.TextSize = theme.CaptionTextSize()
 	label.TextStyle = fyne.TextStyle{Bold: true}
 	return label
+}
+
+// shortenPath trims the middle of a long path so the status bar keeps its
+// proportions on small windows.
+func shortenPath(path string, max int) string {
+	runes := []rune(path)
+	if len(runes) <= max {
+		return path
+	}
+	keep := max - 1
+	left := keep / 2
+	right := keep - left
+	return string(runes[:left]) + "…" + string(runes[len(runes)-right:])
 }
 
 // abbreviateHome shortens a path below the user's home directory to "~/...".

@@ -3,6 +3,7 @@ package ui
 import (
 	"image/png"
 	"os"
+	"os/exec"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -30,6 +31,11 @@ func TestVisualStates(t *testing.T) {
 		"homelab/nas/admin":  "Bt6^gJ3mN9&pQ4wR\nlogin: admin\n\nПароль меняется раз в квартал\n",
 		"social/mastodon":    "Vx1!zC5vB8@nM2kJ\nlogin: alice@example.social\n",
 	})
+
+	// Делаем демо-хранилище git-репозиторием, чтобы в статусбаре был «git ✓».
+	if err := exec.Command("git", "-C", store.Dir, "init", "-q").Run(); err != nil {
+		t.Logf("git init для скриншотов не удался: %v", err)
+	}
 
 	newApp := func() *App {
 		a, err := New(test.NewTempApp(t), Options{
@@ -59,6 +65,23 @@ func TestVisualStates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
+	// Экран «pass не найден»: отдельное хранилище без бинарника.
+	missingStore, _ := fakeStore(t, map[string]string{"personal/mail": "x\n"})
+	missingStore.Binary = ""
+	missing, err := New(test.NewTempApp(t), Options{
+		Store: missingStore,
+		Clip:  clipboard.NewWithClipboard(&memClipboard{}, 0),
+		AppID: "test.gopass",
+		Sync:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing.Window().Resize(fyne.NewSize(920, 600))
+	missing.Window().Show()
+	missing.checkEnvironment()
+	save(missing, "09-missing-pass.png")
 
 	a := newApp()
 	save(a, "01-tree.png")

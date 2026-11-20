@@ -45,3 +45,25 @@ jobs:
 
       - name: Проверка архитектур
         run: lipo -info dist/GoPass.app/Contents/MacOS/go-pass
+
+  # Проверка настоящей совместимости с pass и gpg (без Fyne/cgo, поэтому Linux).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Установить pass и gpg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pass gnupg git
+
+      - name: E2E с настоящими pass и gpg
+        env:
+          GOPASS_E2E: "1"
+        run: go test ./internal/pass -run TestE2EPassAndGit -v

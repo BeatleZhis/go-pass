@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -49,8 +50,22 @@ func main() {
 	}
 
 	store, err := pass.New()
+	cliMode := *list || *show != "" || *copyName != "" || *deleteName != ""
 	if err != nil {
-		fail(err)
+		if errors.Is(err, pass.ErrNoBinary) && !cliMode {
+			// GUI: покажем диалог с выбором пути к pass.
+			fmt.Fprintln(os.Stderr, "go-pass:", err)
+		} else if cliMode {
+			fail(err)
+		} else {
+			failGUI(err)
+		}
+	}
+	if store == nil {
+		if cliMode {
+			fail(err)
+		}
+		failGUI(err)
 	}
 
 	switch {

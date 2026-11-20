@@ -35,7 +35,7 @@ func fakeStore(t *testing.T, entries map[string]string) (*pass.Store, string) {
 	// show отдаёт содержимое .gpg, если оно уже записано (после insert), иначе
 	// заранее заданный текст. insert записывает stdin и в файл хранилища, и в
 	// файл inserted, чтобы тесты могли проверить оба сценария.
-	script := "#!/bin/sh\ncase \"$1\" in\nshow)\n  f='" + storeDir + "'/\"$2.gpg\"\n  if [ -s \"$f\" ]; then cat \"$f\"; else\n    case \"$2\" in\n"
+	script := "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'pass 1.7.4'; exit 0 ;;\nshow)\n  f='" + storeDir + "'/\"$2.gpg\"\n  if [ -s \"$f\" ]; then cat \"$f\"; else\n    case \"$2\" in\n"
 	i := 0
 	for name, content := range entries {
 		p := filepath.Join(storeDir, filepath.FromSlash(name)+".gpg")

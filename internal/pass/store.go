@@ -102,12 +102,10 @@ func New() (*Store, error) {
 		return nil, fmt.Errorf("хранилище паролей не является каталогом: %s", abs)
 	}
 
-	binary, err := findPassBinary()
-	if err != nil {
-		return nil, err
-	}
-
-	return &Store{Binary: binary, Dir: abs, Timeout: DefaultTimeout}, nil
+	// Store is usable for listing even without the CLI: the GUI offers to
+	// locate or install pass. CLI mode treats ErrNoBinary as fatal.
+	binary, binErr := LookupBinary("")
+	return &Store{Binary: binary, Dir: abs, Timeout: DefaultTimeout}, binErr
 }
 
 // expandHome resolves a leading "~" in p.
@@ -123,38 +121,6 @@ func expandHome(p string) string {
 		return home
 	}
 	return filepath.Join(home, p[2:])
-}
-
-// findPassBinary looks for the pass CLI. GUI applications started from Finder
-// usually get a minimal PATH that does not include Homebrew, so the common
-// install locations are probed explicitly.
-func findPassBinary() (string, error) {
-	// An explicit override always wins, so the app can be pointed at a
-	// specific pass install (or a test double).
-	if override := os.Getenv("PASS_BINARY"); override != "" {
-		if p, err := exec.LookPath(override); err == nil {
-			return p, nil
-		}
-		return "", fmt.Errorf("PASS_BINARY=%q указывает на несуществующий файл", override)
-	}
-	if p, err := exec.LookPath("pass"); err == nil {
-		return p, nil
-	}
-	candidates := []string{
-		"/opt/homebrew/bin/pass",
-		"/usr/local/bin/pass",
-		"/usr/bin/pass",
-		"/home/linuxbrew/.linuxbrew/bin/pass",
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".local", "bin", "pass"))
-	}
-	for _, c := range candidates {
-		if info, err := os.Stat(c); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return c, nil
-		}
-	}
-	return "", errors.New("не найден CLI pass (установите password-store или укажите PASS_BINARY)")
 }
 
 // env returns the environment for a CLI call: the inherited one plus the store
@@ -335,6 +301,9 @@ func mentionsGit(stderr string) bool {
 // run executes the pass CLI non-interactively. A nil stdin means the process
 // gets no terminal input, so pass can never block on an interactive prompt.
 func (s *Store) run(ctx context.Context, stdin *strings.Reader, args ...string) (stdout, stderr string, err error) {
+	if !s.HasBinary() {
+		return "", "", ErrNoBinary
+	}
 	timeout := s.Timeout
 	if timeout <= 0 {
 		timeout = DefaultTimeout
@@ -357,6 +326,9 @@ func (s *Store) run(ctx context.Context, stdin *strings.Reader, args ...string) 
 
 // cliError converts a process failure into a readable, actionable error.
 func (s *Store) cliError(err error, stderr, what string) error {
+	if errors.Is(err, ErrNoBinary) {
+		return ErrNoBinary
+	}
 	stderr = strings.TrimSpace(stderr)
 
 	var exitErr *exec.ExitError
