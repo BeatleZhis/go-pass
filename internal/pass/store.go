@@ -258,6 +258,52 @@ func (s *Store) Insert(ctx context.Context, name, content string) error {
 	return s.cliError(err, stderr, "insert "+name)
 }
 
+// Delete removes an existing entry through `pass rm --force` and cleans up
+// any empty parent directories left inside the store.
+func (s *Store) Delete(ctx context.Context, name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+
+	target := filepath.Join(s.Dir, filepath.FromSlash(name)+".gpg")
+	before, statErr := os.Stat(target)
+	if os.IsNotExist(statErr) {
+		return fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+
+	_, stderr, err := s.run(ctx, nil, "rm", "--force", name)
+	if err == nil {
+		s.pruneEmptyParents(target)
+		return nil
+	}
+
+	// `pass rm` removes the file first and only then commits the deletion to
+	// git. If git fails (e.g. missing user.email) after the file is gone,
+	// treat the deletion as successful, matching Insert().
+	if before != nil && mentionsGit(stderr) {
+		if _, afterErr := os.Stat(target); os.IsNotExist(afterErr) {
+			s.pruneEmptyParents(target)
+			return nil
+		}
+	}
+	return s.cliError(err, stderr, "rm "+name)
+}
+
+// pruneEmptyParents removes empty ancestor directories of target up to (but
+// excluding) s.Dir. os.Remove only succeeds on empty directories, so non-empty
+// folders and the store root itself are never removed.
+func (s *Store) pruneEmptyParents(target string) {
+	root := filepath.Clean(s.Dir)
+	for dir := filepath.Dir(target); dir != root && strings.HasPrefix(dir, root+string(filepath.Separator)); dir = filepath.Dir(dir) {
+		if strings.HasPrefix(filepath.Base(dir), ".") {
+			break
+		}
+		if err := os.Remove(dir); err != nil {
+			break
+		}
+	}
+}
+
 // isFresh reports whether after was created or modified relative to before.
 func isFresh(before, after os.FileInfo) bool {
 	if after == nil {
@@ -327,7 +373,9 @@ func (s *Store) cliError(err error, stderr, what string) error {
 	}
 
 	if isNotFoundMessage(stderr) {
-		return fmt.Errorf("%w: %s", ErrNotFound, strings.TrimPrefix(what, "show "))
+		name := strings.TrimPrefix(what, "show ")
+		name = strings.TrimPrefix(name, "rm ")
+		return fmt.Errorf("%w: %s", ErrNotFound, name)
 	}
 
 	msg := fmt.Sprintf("pass %s завершился с кодом %d", what, code)

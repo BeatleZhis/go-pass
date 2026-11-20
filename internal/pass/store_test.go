@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakePass writes a shell script that behaves like `pass` for the two commands
@@ -245,5 +246,160 @@ func TestSecretExtra(t *testing.T) {
 	// CRLF нормализуется, хвостовые переводы строк отбрасываются.
 	if got := ParseSecret("x", "p\r\nlogin: u\r\n").Extra(); got != "login: u" {
 		t.Errorf("Extra() с CRLF = %q", got)
+	}
+}
+
+func TestStoreDelete(t *testing.T) {
+	storeDir := t.TempDir()
+	entryPath := filepath.Join(storeDir, "personal", "mail.gpg")
+	if err := os.MkdirAll(filepath.Dir(entryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(entryPath, []byte("ciphertext"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	argsLog := filepath.Join(t.TempDir(), "args.txt")
+	bin := filepath.Join(t.TempDir(), "pass")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" > '" + argsLog + "'\n" +
+		"if [ \"$1\" = \"rm\" ] && [ \"$2\" = \"--force\" ] && [ -n \"$3\" ]; then\n" +
+		"  rm -f \"$PASSWORD_STORE_DIR/$3.gpg\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Store{Binary: bin, Dir: storeDir, Timeout: 5 * time.Second}
+	ctx := context.Background()
+
+	for _, bad := range []string{"", "../secret", "/abs/path", "dir/.hidden"} {
+		if err := s.Delete(ctx, bad); err == nil {
+			t.Errorf("Delete(%q) не вернул ошибку валидации", bad)
+		}
+	}
+
+	if err := s.Delete(ctx, "personal/mail"); err != nil {
+		t.Fatalf("Delete(personal/mail): %v", err)
+	}
+	if _, err := os.Stat(entryPath); !os.IsNotExist(err) {
+		t.Fatalf("файл записи должен быть удалён, stat err = %v", err)
+	}
+	gotArgs, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatalf("не прочитан лог аргументов: %v", err)
+	}
+	if got := strings.TrimSpace(string(gotArgs)); got != "rm --force personal/mail" {
+		t.Errorf("аргументы pass = %q, want %q", got, "rm --force personal/mail")
+	}
+
+	if err := s.Delete(ctx, "personal/mail"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("Delete несуществующей записи = %v, want ErrNotFound", err)
+	}
+}
+
+func TestStoreDeleteGitCommitFailure(t *testing.T) {
+	t.Run("игнорирует ошибку git если файл уже удалён", func(t *testing.T) {
+		storeDir := t.TempDir()
+		entryPath := filepath.Join(storeDir, "dev", "token.gpg")
+		if err := os.MkdirAll(filepath.Dir(entryPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(entryPath, []byte("ciphertext"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		bin := filepath.Join(t.TempDir(), "pass")
+		script := "#!/bin/sh\n" +
+			"rm -f \"$PASSWORD_STORE_DIR/$3.gpg\"\n" +
+			"echo \"fatal: unable to auto-detect email address\" >&2\n" +
+			"exit 128\n"
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		s := &Store{Binary: bin, Dir: storeDir, Timeout: 5 * time.Second}
+		if err := s.Delete(context.Background(), "dev/token"); err != nil {
+			t.Fatalf("ошибка git после удаления файла должна игнорироваться, получено: %v", err)
+		}
+	})
+
+	t.Run("возвращает ошибку если файл остался на диске", func(t *testing.T) {
+		storeDir := t.TempDir()
+		entryPath := filepath.Join(storeDir, "dev", "locked.gpg")
+		if err := os.MkdirAll(filepath.Dir(entryPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(entryPath, []byte("ciphertext"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		bin := filepath.Join(t.TempDir(), "pass")
+		script := "#!/bin/sh\n" +
+			"echo \"permission denied\" >&2\n" +
+			"exit 1\n"
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		s := &Store{Binary: bin, Dir: storeDir, Timeout: 5 * time.Second}
+		err := s.Delete(context.Background(), "dev/locked")
+		if err == nil {
+			t.Fatal("ожидалась ошибка, так как файл не был удалён")
+		}
+		if !strings.Contains(err.Error(), "permission denied") {
+			t.Errorf("неожиданное сообщение об ошибке: %v", err)
+		}
+	})
+}
+
+func TestStoreDeletePrunesEmptyParents(t *testing.T) {
+	storeDir := t.TempDir()
+	deepEntry := filepath.Join(storeDir, "cloud", "aws", "prod", "root.gpg")
+	siblingEntry := filepath.Join(storeDir, "cloud", "gcp.gpg")
+
+	for _, p := range []string{deepEntry, siblingEntry} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("ciphertext"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	bin := filepath.Join(t.TempDir(), "pass")
+	script := "#!/bin/sh\nrm -f \"$PASSWORD_STORE_DIR/$3.gpg\"\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	s := &Store{Binary: bin, Dir: storeDir, Timeout: 5 * time.Second}
+	ctx := context.Background()
+
+	if err := s.Delete(ctx, "cloud/aws/prod/root"); err != nil {
+		t.Fatalf("Delete(cloud/aws/prod/root): %v", err)
+	}
+	for _, removed := range []string{
+		filepath.Join(storeDir, "cloud", "aws", "prod"),
+		filepath.Join(storeDir, "cloud", "aws"),
+	} {
+		if _, err := os.Stat(removed); !os.IsNotExist(err) {
+			t.Errorf("пустая папка %q должна быть удалена", removed)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "cloud")); err != nil {
+		t.Errorf("непустая папка cloud должна остаться: %v", err)
+	}
+
+	if err := s.Delete(ctx, "cloud/gcp"); err != nil {
+		t.Fatalf("Delete(cloud/gcp): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(storeDir, "cloud")); !os.IsNotExist(err) {
+		t.Errorf("опустевшая папка cloud должна быть удалена")
+	}
+	if _, err := os.Stat(storeDir); err != nil {
+		t.Fatalf("корневой каталог хранилища не должен удаляться: %v", err)
 	}
 }
