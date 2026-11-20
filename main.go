@@ -48,7 +48,17 @@ func main() {
 		}
 	}
 
-	store, err := pass.New()
+	kr, err := pass.OpenKeyring("")
+	if err != nil {
+		fail(err)
+	}
+	if pw := os.Getenv("GOPASS_PASSPHRASE"); pw != "" && kr.HasPrivateKey() {
+		if unlockErr := kr.Unlock(pw); unlockErr != nil {
+			fail(unlockErr)
+		}
+	}
+
+	store, err := pass.NewAuto(kr)
 	if err != nil {
 		fail(err)
 	}

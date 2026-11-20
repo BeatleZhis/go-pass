@@ -74,6 +74,110 @@ type Store struct {
 	Dir string
 	// Timeout is applied to every CLI call. Zero means DefaultTimeout.
 	Timeout time.Duration
+	Keyring *Keyring
+}
+
+// InitStore initializes a password-store directory with a .gpg-id file
+// pointing to recipientID (fingerprint or key ID).
+func InitStore(dir, recipientID string) error {
+	if strings.TrimSpace(dir) == "" {
+		return errors.New("путь к хранилищу не указан")
+	}
+	if strings.TrimSpace(recipientID) == "" {
+		return errors.New("не указан идентификатор ключа для .gpg-id")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("не удалось создать каталог хранилища: %w", err)
+	}
+	gpgID := filepath.Join(dir, ".gpg-id")
+	return os.WriteFile(gpgID, []byte(strings.TrimSpace(recipientID)+"\n"), 0o600)
+}
+
+func (s *Store) showEmbedded(name string) (*Secret, error) {
+	if err := ValidateName(name); err != nil {
+		return nil, err
+	}
+	target := filepath.Join(s.Dir, filepath.FromSlash(name)+".gpg")
+	cipher, err := os.ReadFile(target)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("не удалось прочитать %s: %w", name, err)
+	}
+
+	keys := s.Keyring.UnlockedKeys()
+	if len(keys) == 0 {
+		return nil, ErrLocked
+	}
+
+	var lastErr error
+	for _, k := range keys {
+		plain, err := DecryptBinary(cipher, k)
+		if err == nil {
+			return ParseSecret(name, string(plain)), nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, ErrLocked
+}
+
+func (s *Store) insertEmbedded(name, content string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if content == "" {
+		return errors.New("содержимое записи пусто")
+	}
+	if !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
+	recipients, err := ResolveRecipients(s.Dir, name)
+	if err != nil {
+		return err
+	}
+	armors, err := s.Keyring.PublicArmors()
+	if err != nil {
+		return err
+	}
+	ring, err := BuildRecipientKeyRing(recipients, armors)
+	if err != nil {
+		return err
+	}
+
+	cipher, err := EncryptBinary([]byte(content), ring)
+	if err != nil {
+		return err
+	}
+
+	target := filepath.Join(s.Dir, filepath.FromSlash(name)+".gpg")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		return fmt.Errorf("не удалось создать подпапку: %w", err)
+	}
+	tmp := target + ".tmp"
+	if err := os.WriteFile(tmp, cipher, 0o600); err != nil {
+		return fmt.Errorf("не удалось записать файл записи: %w", err)
+	}
+	return os.Rename(tmp, target)
+}
+
+func (s *Store) deleteEmbedded(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	target := filepath.Join(s.Dir, filepath.FromSlash(name)+".gpg")
+	if _, err := os.Stat(target); os.IsNotExist(err) {
+		return fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if err := os.Remove(target); err != nil {
+		return fmt.Errorf("не удалось удалить %s: %w", name, err)
+	}
+	s.pruneEmptyParents(target)
+	return nil
 }
 
 // New discovers the `pass` binary and the password store directory.
@@ -108,6 +212,80 @@ func New() (*Store, error) {
 	}
 
 	return &Store{Binary: binary, Dir: abs, Timeout: DefaultTimeout}, nil
+}
+
+// DefaultStoreDir resolves the configured password store directory without
+// requiring it to exist yet.
+func DefaultStoreDir() (string, error) {
+	dir := os.Getenv("PASSWORD_STORE_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("не удалось определить домашний каталог: %w", err)
+		}
+		dir = filepath.Join(home, ".password-store")
+	} else {
+		dir = expandHome(dir)
+	}
+	return filepath.Abs(dir)
+}
+
+// IsInitialized reports whether s.Dir exists and contains a .gpg-id file
+// (and, in embedded mode, that the keyring has a private key).
+func (s *Store) IsInitialized() bool {
+	if s == nil || s.Dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir, ".gpg-id")); err != nil {
+		return false
+	}
+	if s.Keyring != nil && !s.Keyring.HasPrivateKey() {
+		return false
+	}
+	return true
+}
+
+// NewAuto builds a Store that uses the embedded OpenPGP keyring whenever a
+// private key is present in kr or when the external `pass` CLI is absent.
+// If the store directory is not initialized yet, it still returns a valid
+// Store so the GUI can launch the first-run setup wizard.
+func NewAuto(kr *Keyring) (*Store, error) {
+	abs, err := DefaultStoreDir()
+	if err != nil {
+		return nil, err
+	}
+
+	binary, cliErr := findPassBinary()
+
+	// Use embedded OpenPGP if user already configured a key in the app,
+	// or if external `pass` CLI is not installed on the machine.
+	if kr != nil && (kr.HasPrivateKey() || cliErr != nil) {
+		return &Store{
+			Dir:     abs,
+			Timeout: DefaultTimeout,
+			Keyring: kr,
+		}, nil
+	}
+
+	// External `pass` CLI is available and user hasn't switched to embedded keyring.
+	if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+		return &Store{
+			Binary:  binary,
+			Dir:     abs,
+			Timeout: DefaultTimeout,
+		}, nil
+	}
+
+	// Neither store dir nor embedded key exists yet — fall back to embedded
+	// mode so the onboarding wizard can create everything out of the box.
+	if kr != nil {
+		return &Store{
+			Dir:     abs,
+			Timeout: DefaultTimeout,
+			Keyring: kr,
+		}, nil
+	}
+	return nil, fmt.Errorf("хранилище паролей не найдено: %s", abs)
 }
 
 // expandHome resolves a leading "~" in p.
@@ -219,6 +397,9 @@ func (s *Store) List() ([]Entry, error) {
 
 // Show decrypts an entry through `pass show`.
 func (s *Store) Show(ctx context.Context, name string) (*Secret, error) {
+	if s.Keyring != nil {
+		return s.showEmbedded(name)
+	}
 	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
@@ -232,6 +413,9 @@ func (s *Store) Show(ctx context.Context, name string) (*Secret, error) {
 // Insert stores content as a new entry, overwriting an existing one.
 // The content must start with the password line.
 func (s *Store) Insert(ctx context.Context, name, content string) error {
+	if s.Keyring != nil {
+		return s.insertEmbedded(name, content)
+	}
 	if err := ValidateName(name); err != nil {
 		return err
 	}
@@ -261,6 +445,9 @@ func (s *Store) Insert(ctx context.Context, name, content string) error {
 // Delete removes an existing entry through `pass rm --force` and cleans up
 // any empty parent directories left inside the store.
 func (s *Store) Delete(ctx context.Context, name string) error {
+	if s.Keyring != nil {
+		return s.deleteEmbedded(name)
+	}
 	if err := ValidateName(name); err != nil {
 		return err
 	}

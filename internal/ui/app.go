@@ -133,12 +133,30 @@ func (a *App) Window() fyne.Window {
 
 // Run creates the window and blocks until it is closed.
 func Run(opts Options) error {
-	fyneApp := app.NewWithID(appIDOr(opts.AppID))
+	id := opts.AppID
+	if id == "" {
+		id = "com.github.beatlezhis.gopass"
+	}
+	fyneApp := app.NewWithID(id)
+
+	if opts.Store != nil && opts.Store.Keyring != nil && !opts.Store.IsInitialized() {
+		ShowSetupWizard(fyneApp, opts.Store, opts.Store.Keyring, func() {
+			a, err := New(fyneApp, opts)
+			if err != nil {
+				dialog.ShowError(err, nil)
+				return
+			}
+			a.Window().Show()
+		})
+		fyneApp.Run()
+		return nil
+	}
+
 	a, err := New(fyneApp, opts)
 	if err != nil {
 		return err
 	}
-	a.win.ShowAndRun()
+	a.Window().ShowAndRun()
 	return nil
 }
 
@@ -302,6 +320,7 @@ func (a *App) build() {
 }
 
 // toolbar builds the top toolbar.
+// toolbar builds the top toolbar.
 func (a *App) toolbar() fyne.CanvasObject {
 	addBtn := widget.NewButtonWithIcon("Добавить", theme.ContentAddIcon(), a.showAddDialog)
 	addBtn.Importance = widget.HighImportance
@@ -314,8 +333,15 @@ func (a *App) toolbar() fyne.CanvasObject {
 	a.toggleBtn = widget.NewButtonWithIcon("Развернуть", theme.MenuExpandIcon(), a.toggleAllBranches)
 	a.toggleBtn.Importance = widget.LowImportance
 
+	var right fyne.CanvasObject
+	if a.store != nil && a.store.Keyring != nil {
+		lockBtn := widget.NewButtonWithIcon("Заблокировать", theme.VisibilityOffIcon(), a.lockSession)
+		lockBtn.Importance = widget.LowImportance
+		right = lockBtn
+	}
+
 	bar := container.NewBorder(nil, nil,
-		container.NewHBox(addBtn, refreshBtn, a.toggleBtn), nil)
+		container.NewHBox(addBtn, refreshBtn, a.toggleBtn), right)
 	bg := canvas.NewRectangle(colorSidebar)
 	return container.NewVBox(
 		container.NewStack(bg, container.New(layout.NewCustomPaddedLayout(6, 6, 8, 8), bar)),
@@ -795,6 +821,11 @@ func (a *App) showEntry(name string) {
 				a.current = nil
 				a.passLabel.SetText("—")
 				a.details.SetText("")
+				if isLockedErr(err) {
+					a.setStatus("Требуется мастер-пароль для " + name)
+					a.promptUnlockAndRetry(name)
+					return
+				}
 				a.setStatus("Ошибка расшифровки " + name)
 				a.report(err)
 				return
